@@ -38,7 +38,7 @@ const HomePage = () => {
         if (!roomName || !userInfo) return;
         try {
             const config = { headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${userInfo.token}` } };
-            const { data: newRoom } = await axios.post('/api/rooms', { name: roomName }, config);
+            const { data: newRoom } = await API.post('/api/rooms', { name: roomName }, config);
             setRooms([newRoom, ...rooms]);
             setRoomName('');
         } catch (err) {

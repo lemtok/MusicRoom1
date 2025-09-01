@@ -23,7 +23,7 @@ const LoginPage = () => {
             };
 
             // Отправляем запрос на эндпоинт для логина
-            const { data } = await axios.post(
+            const { data } = await API.post(
                 '/api/users/login',
                 { email, password },
                 config

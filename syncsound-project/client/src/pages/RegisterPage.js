@@ -36,7 +36,7 @@ const RegisterPage = () => {
 
             // Отправляем POST-запрос на наш бэкенд.
             // Благодаря "proxy" в package.json, '/api/users/register' превратится в 'http://localhost:5000/api/users/register'
-            const { data } = await axios.post(
+            const { data } = await API.post(
                 '/api/users/register',
                 body,
                 config

@@ -26,7 +26,7 @@ const JoinPage = () => {
                 };
                 
                 // Отправляем запрос на бэкенд для присоединения
-                await axios.post(`/api/rooms/${roomId}/join`, {}, config);
+                await API.post(`/api/rooms/${roomId}/join`, {}, config);
 
                 // Если все успешно, перенаправляем в комнату
                 navigate(`/room/${roomId}`);

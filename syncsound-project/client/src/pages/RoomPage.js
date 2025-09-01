@@ -40,7 +40,7 @@ const RoomPage = () => {
         const fetchRoomData = async () => {
             try {
                 const config = { headers: { Authorization: `Bearer ${parsedInfo.token}` } };
-                const { data } = await axios.get(`/api/rooms/${roomId}`, config);
+                const { data } = await API.get(`/api/rooms/${roomId}`, config);
                 setRoom(data);
                 setQueue(data.queue || []);
                 setCurrentTrack(data.currentTrack || null);
@@ -52,7 +52,7 @@ const RoomPage = () => {
         };
         fetchRoomData();
 
-        socket = io('http://localhost:5000');
+        socket = io('https://syncsound-backend.onrender.com');
         socket.emit('joinRoom', { roomId, user: parsedInfo });
         
         socket.on('userJoined', (message) => { setSystemMessage(message); setTimeout(() => setSystemMessage(''), 3000); });
@@ -77,7 +77,7 @@ const RoomPage = () => {
         setSearchResults([]);
         try {
             const config = { headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${userInfo.token}` } };
-            const { data } = await axios.post('/api/music/search', { query: searchQuery }, config);
+            const { data } = await API.post('/api/music/search', { query: searchQuery }, config);
             setSearchResults(data);
         } catch (err) { console.error('Ошибка поиска', err); } 
         finally { setIsSearching(false); }
