@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import io from 'socket.io-client';
 import ReactPlayer from 'react-player';
+import API from '../services/api';
 
 let socket;
 
