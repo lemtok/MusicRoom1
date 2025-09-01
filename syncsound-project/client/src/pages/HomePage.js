@@ -26,7 +26,7 @@ const HomePage = () => {
     const fetchRooms = async (token) => {
         try {
             const config = { headers: { Authorization: `Bearer ${token}` } };
-            const { data } = await axios.get('/api/rooms', config);
+            const { data } = await API.get('/api/rooms', config);
             setRooms(data);
         } catch (err) {
             console.error('Не удалось загрузить комнаты', err);
