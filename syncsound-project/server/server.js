@@ -1,53 +1,50 @@
 const express = require('express');
 const dotenv = require('dotenv');
-const http = require('http'); // 1. Импортируем встроенный модуль http
-const { Server } = require('socket.io'); // 2. Импортируем Server из socket.io
-
+const http = require('http');
+const { Server } = require('socket.io');
+const cors = require('cors'); // <-- 1. Импортируем cors
 const connectDB = require('./config/db');
 const userRoutes = require('./routes/userRoutes');
 const roomRoutes = require('./routes/roomRoutes');
+const musicRoutes = require('./routes/musicRoutes');
 const { errorHandler } = require('./middleware/errorMiddleware');
-
-const musicRoutes = require('./routes/musicRoutes'); // <-- Импортируем маршруты музыки
-
 
 dotenv.config();
 connectDB();
 
 const app = express();
-const httpServer = http.createServer(app); // 3. Создаем HTTP сервер на основе Express
 
-// 4. Настраиваем Socket.IO сервер
-const io = new Server(httpServer, {
-    cors: {
-        origin: '*', // Разрешаем доступ с любого источника (для разработки)
-        methods: ['GET', 'POST'],
-    },
-});
-
-// 5. Подключаем логику для сокетов (создадим этот файл на след. шаге)
-require('./socket')(io);
+// --- 2. ДОБАВЛЯЕМ НАСТРОЙКИ CORS ---
+// Указываем, какому адресу мы доверяем.
+const corsOptions = {
+    origin: 'https://syncdound-project-frontend.netlify.app',
+    methods: ['GET', 'POST'],
+};
+app.use(cors(corsOptions));
+// --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
 app.use(express.json());
+
+const httpServer = http.createServer(app);
+
+const io = new Server(httpServer, {
+    cors: corsOptions, // <-- 3. Используем те же опции и для сокетов
+});
+
+require('./socket')(io);
 
 app.get('/', (req, res) => {
     res.send('API для SyncSound запущено...');
 });
 
-// Подключаем маршруты
 app.use('/api/users', userRoutes);
 app.use('/api/rooms', roomRoutes);
+app.use('/api/music', musicRoutes);
 
-// Подключаем middleware для обработки ошибок
 app.use(errorHandler);
 
-app.use('/api/users', userRoutes);
-app.use('/api/rooms', roomRoutes);
-app.use('/api/music', musicRoutes); // <-- Используем маршруты музыки
+const PORT = process.env.PORT || 5000;
 
-const PORT = process.env.PORT || 3000;
-
-// 6. Запускаем HTTP сервер вместо app
 httpServer.listen(PORT, () => {
     console.log(`Сервер (HTTP + WebSocket) успешно запущен на порту ${PORT}`);
 });
