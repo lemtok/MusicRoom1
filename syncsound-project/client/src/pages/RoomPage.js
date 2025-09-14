@@ -207,63 +207,48 @@ const RoomPage = () => {
     }, [roomId, navigate]);
 
     function createPeer(userToSignal, callerId, stream, user) {
-    // 1. Создаем peer БЕЗ потока в конструкторе
+    // Создаем peer, СРАЗУ передавая ему наш аудиопоток
         const peer = new Peer({
             initiator: true,
             trickle: false,
-            // stream, // УБИРАЕМ ЭТУ СТРОКУ!
+            stream: stream, // ВОЗВРАЩАЕМ поток в конструктор
             config: { 
                 iceServers: [
                     { urls: 'stun:stun.l.google.com:19302' },
-                    { urls: 'stun:stun1.l.google.com:19302' },
-                    { urls: 'stun:stun2.l.google.com:19302' }
+                    { urls: 'stun:stun1.l.google.com:1932' } // Примечание: исправил опечатку в порту для надежности
                 ] 
             }
         });
 
-    // 2. Настраиваем отправку сигнала
         peer.on("signal", signal => {
             socketRef.current.emit("sending signal", { userToSignal, callerId, signal, user });
         });
 
-        // 3. ЯВНО добавляем наши аудиодорожки ПОСЛЕ создания peer
-        stream.getTracks().forEach(track => {
-            peer.addTrack(track, stream);
-        });
-
+        // УБИРАЕМ все вызовы peer.addTrack()
         return peer;
     }
     function addPeer(incomingSignal, callerId, stream) {
-    // 1. Создаем peer БЕЗ локального потока в конструкторе.
+    // Создаем peer точно так же, СРАЗУ передавая ему наш аудиопоток
         const peer = new Peer({
             initiator: false,
             trickle: false,
+            stream: stream, // ВОЗВРАЩАЕМ поток в конструктор
             config: { 
                 iceServers: [
                     { urls: 'stun:stun.l.google.com:19302' },
-                    { urls: 'stun:stun1.l.google.com:19302' },
-                    { urls: 'stun:stun2.l.google.com:19302' }
+                    { urls: 'stun:stun1.l.google.com:1932' }
                 ] 
             }
         });
 
-    // 2. Устанавливаем обработчик для отправки ответного сигнала.
         peer.on("signal", signal => {
             socketRef.current.emit("returning signal", { signal, callerId });
         });
 
-        // === КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: МЕНЯЕМ ПОРЯДОК ===
-
-        // 3. СНАЧАЛА добавляем наши дорожки. 
-        // Теперь peer знает, что мы собираемся отправлять аудио.
-        stream.getTracks().forEach(track => {
-            peer.addTrack(track, stream);
-        });
-
-        // 4. И только ТЕПЕРЬ обрабатываем входящий сигнал.
-        // Peer сгенерирует ответ (Answer), который будет включать информацию о наших дорожках.
+        // Сначала обрабатываем входящий сигнал
         peer.signal(incomingSignal);
-
+        
+        // УБИРАЕМ все вызовы peer.addTrack()
         return peer;
     }
 
