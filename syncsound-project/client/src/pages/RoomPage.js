@@ -11,14 +11,19 @@ let socket;
 // Маленький компонент для рендеринга аудиопотоков от других участников
 const Audio = (props) => {
     const ref = useRef();
+
     useEffect(() => {
         props.peer.on("stream", stream => {
             if (ref.current) {
                 ref.current.srcObject = stream;
             }
-        })
+        });
     }, [props.peer]);
-    return <audio playsInline autoPlay ref={ref} />;
+
+    return (
+        // playsInline и autoPlay уже есть, добавим muted={false} для явности
+        <audio playsInline autoPlay ref={ref} muted={false} />
+    );
 };
 
 const RoomPage = () => {
@@ -136,15 +141,40 @@ const RoomPage = () => {
     }, [roomId, navigate]);
 
     // --- ФУНКЦИИ ДЛЯ WEBRTC ---
+    // --- НОВАЯ, ИСПРАВЛЕННАЯ ВЕРСИЯ ---
     function createPeer(userToSignal, callerId, stream, user) {
-        const peer = new Peer({ initiator: true, trickle: false, stream });
+        const peer = new Peer({
+            initiator: true,
+            trickle: false,
+            stream,
+            // --- ДОБАВЛЕН ЭТОТ БЛОК ---
+            config: {
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { urls: 'stun:stun1.l.google.com:19302' },
+                    { urls: 'stun:stun2.l.google.com:19302' }, // Добавим еще один для надежности
+                ]
+            }
+            // --- КОНЕЦ ДОБАВЛЕННОГО БЛОКА ---
+        });
+        
         peer.on("signal", signal => {
             socket.emit("sending signal", { userToSignal, callerId, signal, user });
         });
         return peer;
     }
     function addPeer(incomingSignal, callerId, stream) {
-        const peer = new Peer({ initiator: false, trickle: false, stream });
+        const peer = new Peer({ 
+            initiator: false, 
+            trickle: false, 
+            stream,
+            config: {
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { urls: 'stun:stun1.l.google.com:19302' },
+                ]
+            }
+        });
         peer.on("signal", signal => {
             socket.emit("returning signal", { signal, callerId });
         });
