@@ -222,10 +222,10 @@ const RoomPage = () => {
         return peer;
     }
     function addPeer(incomingSignal, callerId, stream) {
+    // 1. Создаем peer БЕЗ локального потока в конструкторе.
         const peer = new Peer({
             initiator: false,
             trickle: false,
-            // stream,  // 1. УБИРАЕМ поток из конструктора
             config: { 
                 iceServers: [
                     { urls: 'stun:stun.l.google.com:19302' },
@@ -234,15 +234,20 @@ const RoomPage = () => {
                 ] 
             }
         });
+
+    // 2. Устанавливаем обработчик для отправки ответного сигнала.
         peer.on("signal", signal => {
             socketRef.current.emit("returning signal", { signal, callerId });
         });
 
-        // 2. СНАЧАЛА обрабатываем входящий сигнал
+    // 3. Обрабатываем входящий сигнал от инициатора. Это настраивает входящие дорожки.
         peer.signal(incomingSignal);
 
-        // 3. И только ПОТОМ добавляем наш исходящий поток
-        peer.addStream(stream); 
+    // 4. ЯВНО и НАДЕЖНО добавляем наши собственные аудиодорожки для отправки.
+    // Это самая важная часть.
+        stream.getTracks().forEach(track => {
+            peer.addTrack(track, stream);
+        });
 
         return peer;
     }
