@@ -55,7 +55,7 @@ const Audio = ({ peer, user }) => {
             <div style={styles.audioVisualizer}>
                 <div style={{...styles.audioLevel, width: `${audioLevel}%`}}></div>
             </div>
-            <span>{user.name}</span>
+            <span>{user?.name || 'Гость'}</span>
         </div>
     );
 };
@@ -67,10 +67,14 @@ const RoomPage = () => {
     const chatEndRef = useRef(null);
     const peersRef = useRef([]);
     
+    const socketRef = useRef(); // <-- Сокет теперь в Ref
+    const userStreamRef = useRef();
 
     // --- Существующие состояния ---
     const [userInfo, setUserInfo] = useState(null);
     const [room, setRoom] = useState(null);
+    const [peers, setPeers] = useState([]); // Только для рендеринга
+    const [isMuted, setIsMuted] = useState(false);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
     const [systemMessage, setSystemMessage] = useState('');
@@ -85,9 +89,7 @@ const RoomPage = () => {
     
     
     // --- НОВЫЕ СОСТОЯНИЯ ДЛЯ АУДИОЧАТА ---
-    const [peers, setPeers] = useState([]);
     const [userStream, setUserStream] = useState();
-    const [isMuted, setIsMuted] = useState(false);
 
     const isHost = userInfo?._id === room?.host;
     
@@ -97,32 +99,18 @@ const RoomPage = () => {
         const parsedInfo = JSON.parse(storedUserInfo);
         setUserInfo(parsedInfo);
 
-        const fetchRoomData = async () => {
-            try {
-                const config = { headers: { Authorization: `Bearer ${parsedInfo.token}` } };
-                const { data } = await API.get(`/api/rooms/${roomId}`, config);
-                setRoom(data);
-                setQueue(data.queue || []);
-                setCurrentTrack(data.currentTrack || null);
-                setIsPlaying(data.isPlaying || false);
-            } catch (err) {
-                console.error(err);
-                setError(err.response?.data?.message || 'Не удалось загрузить данные комнаты');
-            } finally { setLoading(false); }
-        };
+        const fetchRoomData = async () => { /* ... */ };
         fetchRoomData();
 
-        socket = io('https://syncsound-backend.onrender.com');
-        
-        // --- ЗАПРОС ДОСТУПА К МИКРОФОНУ И ПОДКЛЮЧЕНИЕ ---
+        socketRef.current = io('https://syncsound-backend.onrender.com');
+        const socket = socketRef.current; // Используем локальную переменную для удобства
+
         navigator.mediaDevices.getUserMedia({ video: false, audio: true }).then(stream => {
-            console.log("[Mic] Доступ к микрофону получен.");
-            setUserStream(stream);
+            userStreamRef.current = stream; // Сохраняем поток в Ref
             
             socket.emit('joinRoom', { roomId, user: parsedInfo });
             
             socket.on('all users', users => {
-                console.log("[Signal] Получен список всех участников:", users);
                 const newPeers = [];
                 users.forEach(u => {
                     const peer = createPeer(u.socketId, socket.id, stream, parsedInfo);
@@ -133,20 +121,14 @@ const RoomPage = () => {
             });
             
             socket.on('user joined', payload => {
-                console.log("[Signal] В комнату вошел новый участник, создаем ответный peer:", payload.callerId);
                 const peer = addPeer(payload.signal, payload.callerId, stream);
                 peersRef.current.push({ peerId: payload.callerId, peer });
                 setPeers(currentPeers => [...currentPeers, { peerId: payload.callerId, peer, user: payload.user }]);
             });
 
             socket.on('receiving returned signal', payload => {
-                console.log("[Signal] Получен ответный сигнал от:", payload.id);
                 const item = peersRef.current.find(p => p.peerId === payload.id);
-                if (item) {
-                    item.peer.signal(payload.signal);
-                } else {
-                    console.error("[Signal] Не найден peer для ответного сигнала:", payload.id);
-                }
+                if (item) { item.peer.signal(payload.signal); }
             });
 
             socket.on('user left', id => {
@@ -186,30 +168,26 @@ const RoomPage = () => {
     // --- ФУНКЦИИ ДЛЯ WEBRTC ---
     // --- НОВАЯ, ИСПРАВЛЕННАЯ ВЕРСИЯ ---
     function createPeer(userToSignal, callerId, stream, user) {
-        console.log(`[WebRTC] Создаю peer-инициатор для ${userToSignal}`);
         const peer = new Peer({ initiator: true, trickle: false, stream });
         peer.on("signal", signal => {
-            console.log(`[WebRTC] Отправляю сигнал от ${callerId} к ${userToSignal}`);
-            socket.emit("sending signal", { userToSignal, callerId, signal, user })
+            // Теперь используем socketRef.current, который всегда доступен
+            socketRef.current.emit("sending signal", { userToSignal, callerId, signal, user });
         });
         return peer;
     }
     function addPeer(incomingSignal, callerId, stream) {
-        console.log(`[WebRTC] Создаю ответный peer для ${callerId}`);
         const peer = new Peer({ initiator: false, trickle: false, stream });
         peer.on("signal", signal => {
-            console.log(`[WebRTC] Отправляю ответный сигнал от ${socket.id} к ${callerId}`);
-            socket.emit("returning signal", { signal, callerId })
+            socketRef.current.emit("returning signal", { signal, callerId });
         });
         peer.signal(incomingSignal);
         return peer;
     }
 
-    // --- НОВЫЕ ОБРАБОТЧИКИ УПРАВЛЕНИЯ ---
     const handleMute = () => {
-        if (userStream) {
+        if (userStreamRef.current) {
             const isNowMuted = !isMuted;
-            userStream.getAudioTracks()[0].enabled = !isNowMuted;
+            userStreamRef.current.getAudioTracks()[0].enabled = !isNowMuted;
             setIsMuted(isNowMuted);
         }
     };
@@ -375,6 +353,9 @@ const styles = {
     controlButtonMic: { padding: '5px 10px', border: 'none', borderRadius: '4px', cursor: 'pointer', backgroundColor: '#6c757d', color: 'white' },
     mutedButton: { padding: '5px 10px', border: 'none', borderRadius: '4px', cursor: 'pointer', backgroundColor: '#ffc107', color: 'black' },
     leaveButton: { padding: '5px 10px', border: 'none', borderRadius: '4px', cursor: 'pointer', backgroundColor: '#dc3545', color: 'white' },
+    participant: { display: 'flex', alignItems: 'center', marginBottom: '5px' },
+    audioVisualizer: { width: '100px', height: '20px', border: '1px solid #ccc', marginRight: '10px', backgroundColor: '#e9ecef' },
+    audioLevel: { height: '100%', backgroundColor: '#28a745', transition: 'width 0.1s ease-in-out' },
     participant: { display: 'flex', alignItems: 'center', marginBottom: '5px' },
     audioVisualizer: { width: '100px', height: '20px', border: '1px solid #ccc', marginRight: '10px', backgroundColor: '#e9ecef' },
     audioLevel: { height: '100%', backgroundColor: '#28a745', transition: 'width 0.1s ease-in-out' },
