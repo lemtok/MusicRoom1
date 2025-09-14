@@ -11,11 +11,11 @@ const ParticipantView = ({ peer, stream: localStream, user, isMuted }) => {
     const [audioLevel, setAudioLevel] = useState(0);
 
     useEffect(() => {
-        // Функция для настройки визуализатора. Мы будем вызывать её, когда получим поток.
         const setupVisualizer = (stream) => {
-            if (isMuted) {
+            // Визуализацию звука выключаем, только если это локальный пользователь (мы сами)
+            if (isMuted && localStream) {
                 setAudioLevel(0);
-                return; // Если микрофон выключен, ничего не делаем
+                return;
             }
             try {
                 const audioContext = new (window.AudioContext || window.webkitAudioContext)();
@@ -25,7 +25,6 @@ const ParticipantView = ({ peer, stream: localStream, user, isMuted }) => {
                 const bufferLength = analyser.frequencyBinCount;
                 const dataArray = new Uint8Array(bufferLength);
                 source.connect(analyser);
-
                 let animationFrameId;
 
                 const getAudioLevel = () => {
@@ -37,19 +36,16 @@ const ParticipantView = ({ peer, stream: localStream, user, isMuted }) => {
                 };
                 getAudioLevel();
 
-                // Очистка при размонтировании компонента или изменении isMuted
-                return () => {
+                return () => { // Функция очистки
                     cancelAnimationFrame(animationFrameId);
                     source.disconnect();
                     analyser.disconnect();
-                    audioContext.close();
+                    audioContext.close().catch(e => console.error("Не удалось закрыть AudioContext", e));
                 };
-            } catch (e) {
-                console.error('Ошибка создания AudioContext:', e);
-            }
+            } catch (e) { console.error('Ошибка создания AudioContext:', e); }
         };
 
-        if (peer) { // Для других участников
+        if (peer) { // --- Логика для ДРУГИХ участников ---
             const handleStream = remoteStream => {
                 if (audioRef.current) {
                     audioRef.current.srcObject = remoteStream;
@@ -57,35 +53,42 @@ const ParticipantView = ({ peer, stream: localStream, user, isMuted }) => {
                 }
                 setupVisualizer(remoteStream);
             };
-            peer.on("stream", handleStream);
 
-            // Очистка слушателя
+            // === КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ "СОСТОЯНИЯ ГОНКИ" ===
+            // Проверяем, не пришел ли поток ДО того, как компонент отрисовался
+            if (peer.streams[0]) {
+                handleStream(peer.streams[0]); // Если поток уже здесь, обрабатываем его
+            } else {
+                peer.on("stream", handleStream); // Иначе, подписываемся и ждем события 'stream'
+            }
+            // === КОНЕЦ ИСПРАВЛЕНИЯ ===
+
+            // Очистка слушателя при размонтировании
             return () => {
                 peer.off("stream", handleStream);
             }
 
-        } else if (localStream) { // Для себя
+        } else if (localStream) { // --- Логика для СЕБЯ (локального пользователя) ---
             const cleanup = setupVisualizer(localStream);
             return cleanup;
         }
 
     }, [peer, localStream, user, isMuted]);
 
-    // Определяем стиль для индикатора в зависимости от того, выключен ли микрофон
     const audioLevelStyle = {
         ...styles.audioLevel,
         width: `${Math.min(100, audioLevel * 2)}%`,
-        backgroundColor: isMuted ? '#6c757d' : '#28a745' // Серый, если выключен
+        // Стиль меняется на серый только для локального пользователя при выключении микрофона
+        backgroundColor: (isMuted && localStream) ? '#6c757d' : '#28a745'
     };
 
     return (
         <div style={styles.participant}>
-            {/* Аудиоэлемент нужен только для удаленных пиров, чтобы их слышать */}
+            {/* Аудиоэлемент для прослушивания нужен только для других участников */}
             {peer && <audio playsInline autoPlay ref={audioRef} />}
             <div style={styles.audioVisualizer}>
                 <div style={audioLevelStyle}></div>
             </div>
-            {/* Добавляем "(Вы)", если это локальный пользователь */}
             <span>{user?.name || 'Гость'} {localStream ? '(Вы)' : ''}</span>
         </div>
     );
