@@ -18,6 +18,7 @@ const Audio = ({ peer, user }) => {
         peer.on("stream", stream => {
             if (audioRef.current) {
                 audioRef.current.srcObject = stream;
+                audioRef.current.play().catch(error => console.error("Ошибка автовоспроизведения:", error));
                 try {
                     const audioContext = new (window.AudioContext || window.webkitAudioContext)();
                     const source = audioContext.createMediaStreamSource(stream);
@@ -146,7 +147,7 @@ const RoomPage = () => {
             });
         }).catch(err => {
             console.error("Ошибка доступа к микрофону:", err);
-            socket.emit('joinRoom', { roomId, user: parsedInfo });
+            setError("Необходим доступ к микрофону для входа в аудиочат. Пожалуйста, обновите страницу и разрешите доступ.");
         });
         
         socket.on('userJoined', (message) => { setSystemMessage(message); setTimeout(() => setSystemMessage(''), 3000); });
@@ -168,14 +169,36 @@ const RoomPage = () => {
     }, [roomId, navigate]);
 
     function createPeer(userToSignal, callerId, stream, user) {
-        const peer = new Peer({ initiator: true, trickle: false, stream });
+        const peer = new Peer({
+            initiator: true,
+            trickle: false,
+            stream,
+            config: { 
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { urls: 'stun:stun1.l.google.com:19302' },
+                    { urls: 'stun:stun2.l.google.com:19302' }
+                ] 
+            }
+        });
         peer.on("signal", signal => {
             socketRef.current.emit("sending signal", { userToSignal, callerId, signal, user });
         });
         return peer;
     }
     function addPeer(incomingSignal, callerId, stream) {
-        const peer = new Peer({ initiator: false, trickle: false, stream });
+        const peer = new Peer({
+            initiator: false,
+            trickle: false,
+            stream,
+            config: { 
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { urls: 'stun:stun1.l.google.com:19302' },
+                    { urls: 'stun:stun2.l.google.com:19302' }
+                ] 
+            }
+        });
         peer.on("signal", signal => {
             socketRef.current.emit("returning signal", { signal, callerId });
         });
