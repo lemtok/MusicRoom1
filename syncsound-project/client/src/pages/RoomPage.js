@@ -20,9 +20,18 @@ const Audio = (props) => {
         });
     }, [props.peer]);
 
+    // Этот "хак" помогает обойти блокировку автовоспроизведения в Chrome
+    const playAudio = () => {
+        if (ref.current) {
+            ref.current.play().catch(error => {
+                console.error("Ошибка автовоспроизведения аудио:", error);
+            });
+        }
+    };
+
     return (
-        // playsInline и autoPlay уже есть, добавим muted={false} для явности
-        <audio playsInline autoPlay ref={ref} muted={false} />
+        // Мы убираем autoPlay и будем запускать его сами, когда это будет безопасно
+        <audio playsInline ref={ref} onCanPlay={playAudio} />
     );
 };
 
