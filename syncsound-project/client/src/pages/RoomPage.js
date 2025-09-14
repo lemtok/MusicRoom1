@@ -225,7 +225,7 @@ const RoomPage = () => {
         const peer = new Peer({
             initiator: false,
             trickle: false,
-            stream,
+            // stream,  // 1. УБИРАЕМ поток из конструктора
             config: { 
                 iceServers: [
                     { urls: 'stun:stun.l.google.com:19302' },
@@ -237,7 +237,13 @@ const RoomPage = () => {
         peer.on("signal", signal => {
             socketRef.current.emit("returning signal", { signal, callerId });
         });
+
+        // 2. СНАЧАЛА обрабатываем входящий сигнал
         peer.signal(incomingSignal);
+
+        // 3. И только ПОТОМ добавляем наш исходящий поток
+        peer.addStream(stream); 
+
         return peer;
     }
 
