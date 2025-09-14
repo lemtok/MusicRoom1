@@ -1,64 +1,96 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import axios from 'axios';
 import io from 'socket.io-client';
 import ReactPlayer from 'react-player';
 import API from '../services/api';
 import Peer from 'simple-peer';
 
-let socket;
-
-const Audio = ({ peer, user }) => {
+// Переименованный и улучшенный компонент для отображения участника (и себя, и других)
+const ParticipantView = ({ peer, stream: localStream, user, isMuted }) => {
     const audioRef = useRef();
     const [audioLevel, setAudioLevel] = useState(0);
 
     useEffect(() => {
-        if (!peer) return;
-
-        peer.on("stream", stream => {
-            if (audioRef.current) {
-                audioRef.current.srcObject = stream;
-                audioRef.current.play().catch(error => console.error("Ошибка автовоспроизведения:", error));
-                try {
-                    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-                    const source = audioContext.createMediaStreamSource(stream);
-                    const analyser = audioContext.createAnalyser();
-                    analyser.fftSize = 256;
-                    const bufferLength = analyser.frequencyBinCount;
-                    const dataArray = new Uint8Array(bufferLength);
-                    source.connect(analyser);
-
-                    const getAudioLevel = () => {
-                        if (analyser) {
-                            analyser.getByteFrequencyData(dataArray);
-                            let sum = dataArray.reduce((a, b) => a + b, 0);
-                            let avg = sum / bufferLength;
-                            setAudioLevel(avg);
-                            requestAnimationFrame(getAudioLevel);
-                        }
-                    };
-                    getAudioLevel();
-                } catch (e) {
-                    console.error('Ошибка создания AudioContext:', e);
-                }
+        // Функция для настройки визуализатора. Мы будем вызывать её, когда получим поток.
+        const setupVisualizer = (stream) => {
+            if (isMuted) {
+                setAudioLevel(0);
+                return; // Если микрофон выключен, ничего не делаем
             }
-        });
+            try {
+                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const source = audioContext.createMediaStreamSource(stream);
+                const analyser = audioContext.createAnalyser();
+                analyser.fftSize = 256;
+                const bufferLength = analyser.frequencyBinCount;
+                const dataArray = new Uint8Array(bufferLength);
+                source.connect(analyser);
 
-        peer.on('connect', () => console.log(`[WebRTC] Соединение установлено с ${user?.name}`));
-        peer.on('error', (err) => console.error(`[WebRTC] Ошибка соединения с ${user?.name}:`, err));
+                let animationFrameId;
 
-    }, [peer, user]);
+                const getAudioLevel = () => {
+                    analyser.getByteFrequencyData(dataArray);
+                    let sum = dataArray.reduce((a, b) => a + b, 0);
+                    let avg = (sum / bufferLength) || 0;
+                    setAudioLevel(avg);
+                    animationFrameId = requestAnimationFrame(getAudioLevel);
+                };
+                getAudioLevel();
+
+                // Очистка при размонтировании компонента или изменении isMuted
+                return () => {
+                    cancelAnimationFrame(animationFrameId);
+                    source.disconnect();
+                    analyser.disconnect();
+                    audioContext.close();
+                };
+            } catch (e) {
+                console.error('Ошибка создания AudioContext:', e);
+            }
+        };
+
+        if (peer) { // Для других участников
+            const handleStream = remoteStream => {
+                if (audioRef.current) {
+                    audioRef.current.srcObject = remoteStream;
+                    audioRef.current.play().catch(error => console.error("Ошибка автовоспроизведения:", error));
+                }
+                setupVisualizer(remoteStream);
+            };
+            peer.on("stream", handleStream);
+
+            // Очистка слушателя
+            return () => {
+                peer.off("stream", handleStream);
+            }
+
+        } else if (localStream) { // Для себя
+            const cleanup = setupVisualizer(localStream);
+            return cleanup;
+        }
+
+    }, [peer, localStream, user, isMuted]);
+
+    // Определяем стиль для индикатора в зависимости от того, выключен ли микрофон
+    const audioLevelStyle = {
+        ...styles.audioLevel,
+        width: `${Math.min(100, audioLevel * 2)}%`,
+        backgroundColor: isMuted ? '#6c757d' : '#28a745' // Серый, если выключен
+    };
 
     return (
         <div style={styles.participant}>
-            <audio playsInline autoPlay ref={audioRef} />
+            {/* Аудиоэлемент нужен только для удаленных пиров, чтобы их слышать */}
+            {peer && <audio playsInline autoPlay ref={audioRef} />}
             <div style={styles.audioVisualizer}>
-                <div style={{...styles.audioLevel, width: `${Math.min(100, audioLevel * 2)}%`}}></div>
+                <div style={audioLevelStyle}></div>
             </div>
-            <span>{user?.name || 'Гость'}</span>
+            {/* Добавляем "(Вы)", если это локальный пользователь */}
+            <span>{user?.name || 'Гость'} {localStream ? '(Вы)' : ''}</span>
         </div>
     );
 };
+
 
 const RoomPage = () => {
     const { id: roomId } = useParams();
@@ -104,7 +136,7 @@ const RoomPage = () => {
             } catch (err) {
                 setError(err.response?.data?.message || 'Не удалось загрузить данные комнаты');
             } finally {
-                setLoading(false); // <-- ВОССТАНОВЛЕННАЯ СТРОКА
+                setLoading(false);
             }
         };
         fetchRoomData();
@@ -300,13 +332,27 @@ const RoomPage = () => {
                     </div>
                 </div>
                 <div style={styles.chatSection}>
+                    {/* === ИЗМЕНЕННЫЙ БЛОК === */}
                     <div style={styles.voiceControls}>
                         <h4>Участники в аудиочате:</h4>
-                        <div style={styles.participant}>
-                            <div style={styles.audioVisualizer}></div>
-                            <span>{userInfo?.name} (Вы)</span>
-                        </div>
-                        {peers.map((p) => <Audio key={p.peerId} peer={p.peer} user={p.user} />)}
+                        
+                        {/* Отображаем себя с помощью нового компонента */}
+                        {userStreamRef.current && (
+                            <ParticipantView 
+                                user={userInfo} 
+                                stream={userStreamRef.current} 
+                                isMuted={isMuted} 
+                            />
+                        )}
+
+                        {/* Отображаем других участников */}
+                        {peers.map((p) => (
+                            <ParticipantView 
+                                key={p.peerId} 
+                                peer={p.peer} 
+                                user={p.user} 
+                            />
+                        ))}
                         
                         {userStreamRef.current ? (
                             <div style={styles.userControls}>
@@ -319,6 +365,8 @@ const RoomPage = () => {
                             </div>
                         ) : <p style={{color: 'red'}}>Доступ к микрофону не предоставлен.</p>}
                     </div>
+                    {/* === КОНЕЦ ИЗМЕНЕННОГО БЛОКА === */}
+
                     <h3>Чат</h3>
                     <div style={styles.chatBox}>
                         {messages.map((msg, index) => (<div key={index} style={styles.message}>
