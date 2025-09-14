@@ -161,13 +161,16 @@ const RoomPage = () => {
                 });
                 setPeers(newPeers);
             });
-            
-            socket.on('user joined', payload => {
+
+        // Когда я (старичок) уже в комнате, и ко мне заходит новичок.
+        // Сервер присылает мне его данные. Я должен принять его звонок.
+            socket.on('receiving signal', payload => {
                 const peer = addPeer(payload.signal, payload.callerId, stream);
                 peersRef.current.push({ peerId: payload.callerId, peer });
                 setPeers(currentPeers => [...currentPeers, { peerId: payload.callerId, peer, user: payload.user }]);
             });
 
+            // Когда я (новичок) получаю ответный сигнал от старичка, которому звонил.
             socket.on('receiving returned signal', payload => {
                 const item = peersRef.current.find(p => p.peerId === payload.id);
                 if (item) { item.peer.signal(payload.signal); }

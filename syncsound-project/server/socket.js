@@ -1,50 +1,83 @@
 const Room = require('./models/Room');
 
 module.exports = (io) => {
-    // Хранилище в памяти для отслеживания пользователей в комнатах для WebRTC
-    const usersInRooms = {};
+    const usersInRooms = {}; // Хранилище пользователей { roomId: [{ socketId, user }] }
 
     io.on('connection', (socket) => {
         console.log(`Новое WebSocket соединение: ${socket.id}`);
 
-        // --- ОБРАБОТЧИК ВХОДА В КОМНАТУ (ОБЪЕДИНЕННЫЙ) ---
+        // --- ОБРАБОТЧИК ВХОДА В КОМНАТУ ---
         socket.on('joinRoom', async ({ roomId, user }) => {
             try {
+                // 1. Присоединяем сокет к комнате
                 socket.join(roomId);
                 console.log(`Пользователь ${user.name} (${socket.id}) присоединился к комнате ${roomId}`);
-                
-                // --- Логика для WebRTC ---
+
+                // 2. Инициализируем хранилище для комнаты, если его нет
                 if (!usersInRooms[roomId]) {
                     usersInRooms[roomId] = [];
                 }
 
-                // Отправляем новому пользователю список всех, кто уже в комнате
+                // 3. Отправляем НОВОМУ пользователю список всех, кто УЖЕ в комнате
                 const existingUsers = usersInRooms[roomId];
                 socket.emit('all users', existingUsers);
 
-                // Добавляем нового пользователя в список
-                usersInRooms[roomId].push({ socketId: socket.id, user });
-                // --- Конец логики WebRTC ---
+                // 4. УВЕДОМЛЯЕМ ВСЕХ СТАРЫХ участников о том, что пришел новичок
+                // Это ключевой исправленный шаг!
+                socket.to(roomId).emit('user joined', {
+                    callerId: socket.id,
+                    user: user
+                });
 
-                // --- Старая логика для синхронизации плеера и очереди ---
-                const room = await Room.findById(roomId);
-                if (room) {
-                    socket.emit('initialRoomState', {
-                        queue: room.queue,
-                        currentTrack: room.currentTrack,
-                        isPlaying: room.isPlaying,
-                    });
-                }
+                // 5. Добавляем нового пользователя в список для этой комнаты
+                usersInRooms[roomId].push({ socketId: socket.id, user });
+
             } catch (error) {
                 console.error(`Ошибка при входе в комнату ${roomId}:`, error);
             }
         });
 
-        // --- СУЩЕСТВУЮЩИЕ ОБРАБОТЧИКИ ---
+        // --- ЛОГИКА СИГНАЛИНГА (ПЕРЕДАЧА WEBRTC ДАННЫХ) ---
+        // Сервер здесь просто почтальон - он ничего не меняет, только пересылает.
+
+        // Событие от инициатора (новичка) к существующему участнику
+        socket.on('sending signal', payload => {
+            io.to(payload.userToSignal).emit('receiving signal', {
+                signal: payload.signal,
+                callerId: payload.callerId,
+                user: payload.user
+            });
+        });
+
+        // Ответное событие от существующего участника к инициатору (новичку)
+        socket.on('returning signal', payload => {
+            io.to(payload.callerId).emit('receiving returned signal', {
+                signal: payload.signal,
+                id: socket.id
+            });
+        });
+
+        // --- ОБРАБОТЧИК ОТКЛЮЧЕНИЯ ---
+        socket.on('disconnect', () => {
+            console.log(`Соединение разорвано: ${socket.id}`);
+            let roomID;
+            for (const id in usersInRooms) {
+                const userIndex = usersInRooms[id].findIndex(u => u.socketId === socket.id);
+                if (userIndex !== -1) {
+                    roomID = id;
+                    usersInRooms[id].splice(userIndex, 1);
+                    break;
+                }
+            }
+            if (roomID) {
+                io.to(roomID).emit('user left', socket.id);
+            }
+        });
+
+        // --- СТАРАЯ ЛОГИКА ДЛЯ ПЛЕЕРА (остается без изменений) ---
         socket.on('chatMessage', ({ roomId, user, message }) => {
             io.to(roomId).emit('newMessage', { user: { _id: user._id, name: user.name }, message });
         });
-
         socket.on('addTrackToQueue', async ({ roomId, trackData, user }) => {
             const room = await Room.findById(roomId);
             if (room) {
@@ -54,14 +87,12 @@ module.exports = (io) => {
                 io.to(roomId).emit('queueUpdated', room.queue);
             }
         });
-
         socket.on('togglePlay', async ({ roomId, isPlaying }) => {
              try {
                 await Room.findByIdAndUpdate(roomId, { isPlaying });
                 io.to(roomId).emit('playerStateChanged', { isPlaying });
             } catch (error) { console.error('Ошибка togglePlay:', error); }
         });
-
         socket.on('playNextTrack', async ({ roomId }) => {
             try {
                 const room = await Room.findById(roomId);
@@ -76,49 +107,6 @@ module.exports = (io) => {
                     });
                 }
             } catch (error) { console.error('Ошибка переключения трека:', error); }
-        });
-
-        // --- НОВЫЕ ОБРАБОТЧИКИ ДЛЯ "СИГНАЛИНГА" WEBRTC ---
-        
-        // 1. Когда новый участник (инициатор) отправляет сигнал существующему
-        socket.on('sending signal', payload => {
-            io.to(payload.userToSignal).emit('user joined', { 
-                signal: payload.signal, 
-                callerId: payload.callerId, 
-                user: payload.user 
-            });
-        });
-
-        // 2. Когда существующий участник отправляет ответный сигнал новому
-        socket.on('returning signal', payload => {
-            io.to(payload.callerId).emit('receiving returned signal', { 
-                signal: payload.signal, 
-                id: socket.id 
-            });
-        });
-
-        // --- ОБНОВЛЕННЫЙ ОБРАБОТЧИК ОТКЛЮЧЕНИЯ ---
-        socket.on('disconnect', () => {
-            console.log(`Соединение разорвано: ${socket.id}`);
-            
-            // Находим комнату, в которой был пользователь, и удаляем его из списка
-            let roomID;
-            let userThatLeft;
-            for (const id in usersInRooms) {
-                const userIndex = usersInRooms[id].findIndex(u => u.socketId === socket.id);
-                if (userIndex !== -1) {
-                    roomID = id;
-                    userThatLeft = usersInRooms[id][userIndex];
-                    usersInRooms[id].splice(userIndex, 1);
-                    break;
-                }
-            }
-            
-            // Если пользователь был найден, оповещаем всех остальных в комнате
-            if (roomID) {
-                console.log(`Пользователь ${userThatLeft.user.name} покинул комнату ${roomID}`);
-                io.to(roomID).emit('user left', socket.id);
-            }
         });
     });
 };
