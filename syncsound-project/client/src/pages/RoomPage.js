@@ -4,11 +4,10 @@ import axios from 'axios';
 import io from 'socket.io-client';
 import ReactPlayer from 'react-player';
 import API from '../services/api';
-import Peer from 'simple-peer'; // <-- Убедитесь, что этот импорт есть
+import Peer from 'simple-peer';
 
 let socket;
 
-// Маленький компонент для рендеринга аудиопотоков от других участников
 const Audio = ({ peer, user }) => {
     const audioRef = useRef();
     const [audioLevel, setAudioLevel] = useState(0);
@@ -17,35 +16,35 @@ const Audio = ({ peer, user }) => {
         if (!peer) return;
 
         peer.on("stream", stream => {
-            console.log(`[WebRTC] ПОЛУЧЕН ПОТОК от ${user.name}`);
             if (audioRef.current) {
                 audioRef.current.srcObject = stream;
+                try {
+                    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                    const source = audioContext.createMediaStreamSource(stream);
+                    const analyser = audioContext.createAnalyser();
+                    analyser.fftSize = 256;
+                    const bufferLength = analyser.frequencyBinCount;
+                    const dataArray = new Uint8Array(bufferLength);
+                    source.connect(analyser);
 
-                // --- Логика анализатора звука ---
-                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-                const source = audioContext.createMediaStreamSource(stream);
-                const analyser = audioContext.createAnalyser();
-                analyser.fftSize = 256;
-                const bufferLength = analyser.frequencyBinCount;
-                const dataArray = new Uint8Array(bufferLength);
-                source.connect(analyser);
-
-                const getAudioLevel = () => {
-                    analyser.getByteFrequencyData(dataArray);
-                    let sum = 0;
-                    for(let i = 0; i < bufferLength; i++) {
-                        sum += dataArray[i];
-                    }
-                    let avg = sum / bufferLength;
-                    setAudioLevel(avg);
-                    requestAnimationFrame(getAudioLevel);
-                };
-                getAudioLevel();
+                    const getAudioLevel = () => {
+                        if (analyser) {
+                            analyser.getByteFrequencyData(dataArray);
+                            let sum = dataArray.reduce((a, b) => a + b, 0);
+                            let avg = sum / bufferLength;
+                            setAudioLevel(avg);
+                            requestAnimationFrame(getAudioLevel);
+                        }
+                    };
+                    getAudioLevel();
+                } catch (e) {
+                    console.error('Ошибка создания AudioContext:', e);
+                }
             }
         });
 
-        peer.on('connect', () => console.log(`[WebRTC] СОЕДИНЕНИЕ УСТАНОВЛЕНО с ${user.name}`));
-        peer.on('error', (err) => console.error(`[WebRTC] ОШИБКА соединения с ${user.name}:`, err));
+        peer.on('connect', () => console.log(`[WebRTC] Соединение установлено с ${user?.name}`));
+        peer.on('error', (err) => console.error(`[WebRTC] Ошибка соединения с ${user?.name}:`, err));
 
     }, [peer, user]);
 
@@ -53,7 +52,7 @@ const Audio = ({ peer, user }) => {
         <div style={styles.participant}>
             <audio playsInline autoPlay ref={audioRef} />
             <div style={styles.audioVisualizer}>
-                <div style={{...styles.audioLevel, width: `${audioLevel}%`}}></div>
+                <div style={{...styles.audioLevel, width: `${Math.min(100, audioLevel * 2)}%`}}></div>
             </div>
             <span>{user?.name || 'Гость'}</span>
         </div>
@@ -66,15 +65,11 @@ const RoomPage = () => {
     const playerRef = useRef(null);
     const chatEndRef = useRef(null);
     const peersRef = useRef([]);
-    
-    const socketRef = useRef(); // <-- Сокет теперь в Ref
+    const socketRef = useRef();
     const userStreamRef = useRef();
 
-    // --- Существующие состояния ---
     const [userInfo, setUserInfo] = useState(null);
     const [room, setRoom] = useState(null);
-    const [peers, setPeers] = useState([]); // Только для рендеринга
-    const [isMuted, setIsMuted] = useState(false);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
     const [systemMessage, setSystemMessage] = useState('');
@@ -86,11 +81,9 @@ const RoomPage = () => {
     const [queue, setQueue] = useState([]);
     const [currentTrack, setCurrentTrack] = useState(null);
     const [isPlaying, setIsPlaying] = useState(false);
+    const [peers, setPeers] = useState([]);
+    const [isMuted, setIsMuted] = useState(false);
     
-    
-    // --- НОВЫЕ СОСТОЯНИЯ ДЛЯ АУДИОЧАТА ---
-    const [userStream, setUserStream] = useState();
-
     const isHost = userInfo?._id === room?.host;
     
     useEffect(() => {
@@ -99,14 +92,27 @@ const RoomPage = () => {
         const parsedInfo = JSON.parse(storedUserInfo);
         setUserInfo(parsedInfo);
 
-        const fetchRoomData = async () => { /* ... */ };
+        const fetchRoomData = async () => {
+            try {
+                const config = { headers: { Authorization: `Bearer ${parsedInfo.token}` } };
+                const { data } = await API.get(`/api/rooms/${roomId}`, config);
+                setRoom(data);
+                setQueue(data.queue || []);
+                setCurrentTrack(data.currentTrack || null);
+                setIsPlaying(data.isPlaying || false);
+            } catch (err) {
+                setError(err.response?.data?.message || 'Не удалось загрузить данные комнаты');
+            } finally {
+                setLoading(false); // <-- ВОССТАНОВЛЕННАЯ СТРОКА
+            }
+        };
         fetchRoomData();
 
         socketRef.current = io('https://syncsound-backend.onrender.com');
-        const socket = socketRef.current; // Используем локальную переменную для удобства
+        const socket = socketRef.current;
 
         navigator.mediaDevices.getUserMedia({ video: false, audio: true }).then(stream => {
-            userStreamRef.current = stream; // Сохраняем поток в Ref
+            userStreamRef.current = stream;
             
             socket.emit('joinRoom', { roomId, user: parsedInfo });
             
@@ -133,21 +139,17 @@ const RoomPage = () => {
 
             socket.on('user left', id => {
                 const peerObj = peersRef.current.find(p => p.peerId === id);
-                if(peerObj) {
-                    peerObj.peer.destroy();
-                }
+                if(peerObj) { peerObj.peer.destroy(); }
                 const newPeers = peersRef.current.filter(p => p.peerId !== id);
                 peersRef.current = newPeers;
                 setPeers(newPeers);
             });
         }).catch(err => {
             console.error("Ошибка доступа к микрофону:", err);
-            // Если пользователь отказал в доступе, просто подключаемся без аудио
             socket.emit('joinRoom', { roomId, user: parsedInfo });
         });
-
-        // Старые обработчики событий
-        socket.on('systemMessage', (message) => { setSystemMessage(message); setTimeout(() => setSystemMessage(''), 3000); });
+        
+        socket.on('userJoined', (message) => { setSystemMessage(message); setTimeout(() => setSystemMessage(''), 3000); });
         socket.on('newMessage', (messageData) => setMessages((prev) => [...prev, messageData]));
         socket.on('queueUpdated', (newQueue) => setQueue(newQueue));
         socket.on('playerStateChanged', ({ isPlaying }) => setIsPlaying(isPlaying));
@@ -159,18 +161,15 @@ const RoomPage = () => {
 
         return () => {
             socket.disconnect();
-            if (userStream) {
-                userStream.getTracks().forEach(track => track.stop());
+            if (userStreamRef.current) {
+                userStreamRef.current.getTracks().forEach(track => track.stop());
             }
         };
     }, [roomId, navigate]);
 
-    // --- ФУНКЦИИ ДЛЯ WEBRTC ---
-    // --- НОВАЯ, ИСПРАВЛЕННАЯ ВЕРСИЯ ---
     function createPeer(userToSignal, callerId, stream, user) {
         const peer = new Peer({ initiator: true, trickle: false, stream });
         peer.on("signal", signal => {
-            // Теперь используем socketRef.current, который всегда доступен
             socketRef.current.emit("sending signal", { userToSignal, callerId, signal, user });
         });
         return peer;
@@ -193,9 +192,8 @@ const RoomPage = () => {
     };
     const handleLeaveRoom = () => { navigate('/'); };
 
-    // --- СТАРЫЕ ОБРАБОТЧИКИ ---
-    const addToQueueHandler = (track) => { socket.emit('addTrackToQueue', { roomId, trackData: track, user: userInfo }); };
-    const sendMessageHandler = (e) => { e.preventDefault(); if (newMessage.trim() && userInfo) { socket.emit('chatMessage', { roomId, user: userInfo, message: newMessage }); setNewMessage(''); } };
+    const addToQueueHandler = (track) => { socketRef.current.emit('addTrackToQueue', { roomId, trackData: track, user: userInfo }); };
+    const sendMessageHandler = (e) => { e.preventDefault(); if (newMessage.trim() && userInfo) { socketRef.current.emit('chatMessage', { roomId, user: userInfo, message: newMessage }); setNewMessage(''); } };
     const searchHandler = async (e) => {
         e.preventDefault();
         if (!searchQuery.trim()) return;
@@ -208,10 +206,10 @@ const RoomPage = () => {
         } catch (err) { console.error('Ошибка поиска', err); } 
         finally { setIsSearching(false); }
     };
-    const handleNextTrack = () => { if (isHost) { socket.emit('playNextTrack', { roomId }); } };
-    const handleTogglePlay = () => { if (isHost && currentTrack) { socket.emit('togglePlay', { roomId, isPlaying: !isPlaying }); } };
-    const handleNativePlay = () => { if (isHost && !isPlaying) { socket.emit('togglePlay', { roomId, isPlaying: true }); } };
-    const handleNativePause = () => { if (isHost && isPlaying) { socket.emit('togglePlay', { roomId, isPlaying: false }); } };
+    const handleNextTrack = () => { if (isHost) { socketRef.current.emit('playNextTrack', { roomId }); } };
+    const handleTogglePlay = () => { if (isHost && currentTrack) { socketRef.current.emit('togglePlay', { roomId, isPlaying: !isPlaying }); } };
+    const handleNativePlay = () => { if (isHost && !isPlaying) { socketRef.current.emit('togglePlay', { roomId, isPlaying: true }); } };
+    const handleNativePause = () => { if (isHost && isPlaying) { socketRef.current.emit('togglePlay', { roomId, isPlaying: false }); } };
     
     if (loading) return <div>Загрузка...</div>;
     if (error) return <div style={{color: 'red', padding: '2rem'}}>{error}</div>;
@@ -281,17 +279,13 @@ const RoomPage = () => {
                 <div style={styles.chatSection}>
                     <div style={styles.voiceControls}>
                         <h4>Участники в аудиочате:</h4>
-                        {/* Я (мой микрофон не рендерится) */}
                         <div style={styles.participant}>
-                            <div style={styles.audioVisualizer}>
-                               {/* Здесь можно будет добавить визуализацию своего микрофона */}
-                            </div>
+                            <div style={styles.audioVisualizer}></div>
                             <span>{userInfo?.name} (Вы)</span>
                         </div>
-                        {/* Другие участники */}
                         {peers.map((p) => <Audio key={p.peerId} peer={p.peer} user={p.user} />)}
                         
-                        {userStream ? (
+                        {userStreamRef.current ? (
                             <div style={styles.userControls}>
                                 <button onClick={handleMute} style={isMuted ? styles.mutedButton : styles.controlButtonMic}>
                                     {isMuted ? 'Вкл. микро' : 'Выкл. микро'}
@@ -319,6 +313,7 @@ const RoomPage = () => {
     );
 };
 
+// --- СТИЛИ ---
 const styles = {
     container: { padding: '2rem', height: 'calc(100vh - 4rem)', boxSizing: 'border-box', fontFamily: 'sans-serif' },
     mainContent: { display: 'flex', gap: '2rem', marginTop: '1rem', height: 'calc(100% - 50px)' },
