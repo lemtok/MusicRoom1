@@ -356,9 +356,6 @@ const styles = {
     participant: { display: 'flex', alignItems: 'center', marginBottom: '5px' },
     audioVisualizer: { width: '100px', height: '20px', border: '1px solid #ccc', marginRight: '10px', backgroundColor: '#e9ecef' },
     audioLevel: { height: '100%', backgroundColor: '#28a745', transition: 'width 0.1s ease-in-out' },
-    participant: { display: 'flex', alignItems: 'center', marginBottom: '5px' },
-    audioVisualizer: { width: '100px', height: '20px', border: '1px solid #ccc', marginRight: '10px', backgroundColor: '#e9ecef' },
-    audioLevel: { height: '100%', backgroundColor: '#28a745', transition: 'width 0.1s ease-in-out' },
 };
 
 export default RoomPage;
