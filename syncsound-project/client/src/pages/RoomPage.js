@@ -9,29 +9,54 @@ import Peer from 'simple-peer'; // <-- Убедитесь, что этот им�
 let socket;
 
 // Маленький компонент для рендеринга аудиопотоков от других участников
-const Audio = (props) => {
-    const ref = useRef();
+const Audio = ({ peer, user }) => {
+    const audioRef = useRef();
+    const [audioLevel, setAudioLevel] = useState(0);
 
     useEffect(() => {
-        props.peer.on("stream", stream => {
-            if (ref.current) {
-                ref.current.srcObject = stream;
+        if (!peer) return;
+
+        peer.on("stream", stream => {
+            console.log(`[WebRTC] ПОЛУЧЕН ПОТОК от ${user.name}`);
+            if (audioRef.current) {
+                audioRef.current.srcObject = stream;
+
+                // --- Логика анализатора звука ---
+                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const source = audioContext.createMediaStreamSource(stream);
+                const analyser = audioContext.createAnalyser();
+                analyser.fftSize = 256;
+                const bufferLength = analyser.frequencyBinCount;
+                const dataArray = new Uint8Array(bufferLength);
+                source.connect(analyser);
+
+                const getAudioLevel = () => {
+                    analyser.getByteFrequencyData(dataArray);
+                    let sum = 0;
+                    for(let i = 0; i < bufferLength; i++) {
+                        sum += dataArray[i];
+                    }
+                    let avg = sum / bufferLength;
+                    setAudioLevel(avg);
+                    requestAnimationFrame(getAudioLevel);
+                };
+                getAudioLevel();
             }
         });
-    }, [props.peer]);
 
-    // Этот "хак" помогает обойти блокировку автовоспроизведения в Chrome
-    const playAudio = () => {
-        if (ref.current) {
-            ref.current.play().catch(error => {
-                console.error("Ошибка автовоспроизведения аудио:", error);
-            });
-        }
-    };
+        peer.on('connect', () => console.log(`[WebRTC] СОЕДИНЕНИЕ УСТАНОВЛЕНО с ${user.name}`));
+        peer.on('error', (err) => console.error(`[WebRTC] ОШИБКА соединения с ${user.name}:`, err));
+
+    }, [peer, user]);
 
     return (
-        // Мы убираем autoPlay и будем запускать его сами, когда это будет безопасно
-        <audio playsInline ref={ref} onCanPlay={playAudio} />
+        <div style={styles.participant}>
+            <audio playsInline autoPlay ref={audioRef} />
+            <div style={styles.audioVisualizer}>
+                <div style={{...styles.audioLevel, width: `${audioLevel}%`}}></div>
+            </div>
+            <span>{user.name}</span>
+        </div>
     );
 };
 
@@ -40,6 +65,8 @@ const RoomPage = () => {
     const navigate = useNavigate();
     const playerRef = useRef(null);
     const chatEndRef = useRef(null);
+    const peersRef = useRef([]);
+    
 
     // --- Существующие состояния ---
     const [userInfo, setUserInfo] = useState(null);
@@ -56,11 +83,11 @@ const RoomPage = () => {
     const [currentTrack, setCurrentTrack] = useState(null);
     const [isPlaying, setIsPlaying] = useState(false);
     
+    
     // --- НОВЫЕ СОСТОЯНИЯ ДЛЯ АУДИОЧАТА ---
     const [peers, setPeers] = useState([]);
     const [userStream, setUserStream] = useState();
     const [isMuted, setIsMuted] = useState(false);
-    const peersRef = useRef([]);
 
     const isHost = userInfo?._id === room?.host;
     
@@ -89,11 +116,13 @@ const RoomPage = () => {
         
         // --- ЗАПРОС ДОСТУПА К МИКРОФОНУ И ПОДКЛЮЧЕНИЕ ---
         navigator.mediaDevices.getUserMedia({ video: false, audio: true }).then(stream => {
+            console.log("[Mic] Доступ к микрофону получен.");
             setUserStream(stream);
             
             socket.emit('joinRoom', { roomId, user: parsedInfo });
             
             socket.on('all users', users => {
+                console.log("[Signal] Получен список всех участников:", users);
                 const newPeers = [];
                 users.forEach(u => {
                     const peer = createPeer(u.socketId, socket.id, stream, parsedInfo);
@@ -104,15 +133,20 @@ const RoomPage = () => {
             });
             
             socket.on('user joined', payload => {
+                console.log("[Signal] В комнату вошел новый участник, создаем ответный peer:", payload.callerId);
                 const peer = addPeer(payload.signal, payload.callerId, stream);
                 peersRef.current.push({ peerId: payload.callerId, peer });
-                const newPeer = { peerId: payload.callerId, peer, user: payload.user };
-                setPeers(users => [...users, newPeer]);
+                setPeers(currentPeers => [...currentPeers, { peerId: payload.callerId, peer, user: payload.user }]);
             });
 
             socket.on('receiving returned signal', payload => {
+                console.log("[Signal] Получен ответный сигнал от:", payload.id);
                 const item = peersRef.current.find(p => p.peerId === payload.id);
-                item.peer.signal(payload.signal);
+                if (item) {
+                    item.peer.signal(payload.signal);
+                } else {
+                    console.error("[Signal] Не найден peer для ответного сигнала:", payload.id);
+                }
             });
 
             socket.on('user left', id => {
@@ -152,40 +186,20 @@ const RoomPage = () => {
     // --- ФУНКЦИИ ДЛЯ WEBRTC ---
     // --- НОВАЯ, ИСПРАВЛЕННАЯ ВЕРСИЯ ---
     function createPeer(userToSignal, callerId, stream, user) {
-        const peer = new Peer({
-            initiator: true,
-            trickle: false,
-            stream,
-            // --- ДОБАВЛЕН ЭТОТ БЛОК ---
-            config: {
-                iceServers: [
-                    { urls: 'stun:stun.l.google.com:19302' },
-                    { urls: 'stun:stun1.l.google.com:19302' },
-                    { urls: 'stun:stun2.l.google.com:19302' }, // Добавим еще один для надежности
-                ]
-            }
-            // --- КОНЕЦ ДОБАВЛЕННОГО БЛОКА ---
-        });
-        
+        console.log(`[WebRTC] Создаю peer-инициатор для ${userToSignal}`);
+        const peer = new Peer({ initiator: true, trickle: false, stream });
         peer.on("signal", signal => {
-            socket.emit("sending signal", { userToSignal, callerId, signal, user });
+            console.log(`[WebRTC] Отправляю сигнал от ${callerId} к ${userToSignal}`);
+            socket.emit("sending signal", { userToSignal, callerId, signal, user })
         });
         return peer;
     }
     function addPeer(incomingSignal, callerId, stream) {
-        const peer = new Peer({ 
-            initiator: false, 
-            trickle: false, 
-            stream,
-            config: {
-                iceServers: [
-                    { urls: 'stun:stun.l.google.com:19302' },
-                    { urls: 'stun:stun1.l.google.com:19302' },
-                ]
-            }
-        });
+        console.log(`[WebRTC] Создаю ответный peer для ${callerId}`);
+        const peer = new Peer({ initiator: false, trickle: false, stream });
         peer.on("signal", signal => {
-            socket.emit("returning signal", { signal, callerId });
+            console.log(`[WebRTC] Отправляю ответный сигнал от ${socket.id} к ${callerId}`);
+            socket.emit("returning signal", { signal, callerId })
         });
         peer.signal(incomingSignal);
         return peer;
@@ -230,14 +244,74 @@ const RoomPage = () => {
             {systemMessage && <div style={styles.systemMessage}>{systemMessage}</div>}
             <div style={styles.mainContent}>
                 <div style={styles.playerSection}>
-                    {/* ... существующая разметка плеера, кнопок, очереди и поиска ... */}
+                    <div style={styles.playerArea}>
+                        <div style={styles.playerWrapper}>
+                            {currentTrack ? (
+                                <ReactPlayer 
+                                    ref={playerRef} 
+                                    url={currentTrack.permalink_url} 
+                                    playing={isPlaying} 
+                                    controls={true} 
+                                    width="100%" 
+                                    height="100%" 
+                                    style={styles.reactPlayer} 
+                                    onEnded={handleNextTrack} 
+                                    volume={0.8} 
+                                    onError={(e) => console.error('ReactPlayer Error', e)}
+                                    onPlay={handleNativePlay}
+                                    onPause={handleNativePause}
+                                />
+                            ) : ( <div style={styles.noTrack}><span>Очередь пуста</span></div> )}
+                        </div>
+                    </div>
+                    {isHost && (
+                        <div style={styles.controls}>
+                            <button onClick={handleTogglePlay} disabled={!currentTrack} style={styles.controlButton}>
+                                {isPlaying ? 'Синхронизировать Паузу' : 'Синхронизировать Play'}
+                            </button>
+                            <button onClick={handleNextTrack} disabled={queue.length === 0} style={styles.controlButton}>
+                                Следующий трек
+                            </button>
+                        </div>
+                    )}
+                    <div style={styles.queueContainer}>
+                        <h3>Очередь</h3>
+                        <div style={styles.queueList}>
+                            {queue.length > 0 ? (queue.map((track, index) => (<div key={`${track.id}-${index}`} style={styles.trackItem}>
+                                <span style={styles.queueIndex}>{index + 1}.</span>
+                                <img src={track.artwork_url} alt={track.title} style={styles.trackArt}/>
+                                <div style={styles.trackInfo}><strong>{track.title}</strong><span>Добавил: {track.addedBy.name}</span></div>
+                            </div>))) : (<p>Очередь пуста.</p>)}
+                        </div>
+                    </div>
+                    <div style={styles.searchContainer}>
+                        <form onSubmit={searchHandler}>
+                            <input type="text" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} placeholder="Название трека или исполнитель..." style={styles.searchInput}/>
+                            <button type="submit" disabled={isSearching} style={styles.searchButton}>{isSearching ? 'Поиск...' : 'Найти'}</button>
+                        </form>
+                        <div style={styles.searchResults}>
+                            {searchResults.map(track => (
+                                <div key={track.id} style={styles.trackItem}>
+                                    <img src={track.artwork_url} alt={track.title} style={styles.trackArt}/>
+                                    <div style={styles.trackInfo}><strong>{track.title}</strong><span>{track.user.username}</span></div>
+                                    <button onClick={() => addToQueueHandler(track)} style={styles.addButton}>+</button>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
                 </div>
                 <div style={styles.chatSection}>
-                    {/* --- НОВЫЙ БЛОК: УЧАСТНИКИ И УПРАВЛЕНИЕ --- */}
                     <div style={styles.voiceControls}>
-                        <h4>Участники в аудиочате ({peers.length > 0 ? peers.length + 1 : 1}):</h4>
-                        {/* Рендерим аудио-элементы для каждого пира */}
-                        {peers.map((p) => <Audio key={p.peerId} peer={p.peer} />)}
+                        <h4>Участники в аудиочате:</h4>
+                        {/* Я (мой микрофон не рендерится) */}
+                        <div style={styles.participant}>
+                            <div style={styles.audioVisualizer}>
+                               {/* Здесь можно будет добавить визуализацию своего микрофона */}
+                            </div>
+                            <span>{userInfo?.name} (Вы)</span>
+                        </div>
+                        {/* Другие участники */}
+                        {peers.map((p) => <Audio key={p.peerId} peer={p.peer} user={p.user} />)}
                         
                         {userStream ? (
                             <div style={styles.userControls}>
@@ -250,7 +324,6 @@ const RoomPage = () => {
                             </div>
                         ) : <p style={{color: 'red'}}>Доступ к микрофону не предоставлен.</p>}
                     </div>
-                    {/* --- КОНЕЦ НОВОГО БЛОКА --- */}
                     <h3>Чат</h3>
                     <div style={styles.chatBox}>
                         {messages.map((msg, index) => (<div key={index} style={styles.message}>
@@ -302,6 +375,9 @@ const styles = {
     controlButtonMic: { padding: '5px 10px', border: 'none', borderRadius: '4px', cursor: 'pointer', backgroundColor: '#6c757d', color: 'white' },
     mutedButton: { padding: '5px 10px', border: 'none', borderRadius: '4px', cursor: 'pointer', backgroundColor: '#ffc107', color: 'black' },
     leaveButton: { padding: '5px 10px', border: 'none', borderRadius: '4px', cursor: 'pointer', backgroundColor: '#dc3545', color: 'white' },
+    participant: { display: 'flex', alignItems: 'center', marginBottom: '5px' },
+    audioVisualizer: { width: '100px', height: '20px', border: '1px solid #ccc', marginRight: '10px', backgroundColor: '#e9ecef' },
+    audioLevel: { height: '100%', backgroundColor: '#28a745', transition: 'width 0.1s ease-in-out' },
 };
 
 export default RoomPage;
