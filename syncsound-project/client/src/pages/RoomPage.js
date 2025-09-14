@@ -231,7 +231,7 @@ const RoomPage = () => {
         return peer;
     }
     function addPeer(incomingSignal, callerId, stream) {
-    // 1. Создаем peer БЕЗ потока в конструкторе
+    // 1. Создаем peer БЕЗ локального потока в конструкторе.
         const peer = new Peer({
             initiator: false,
             trickle: false,
@@ -244,18 +244,22 @@ const RoomPage = () => {
             }
         });
 
-    // 2. Настраиваем отправку ответного сигнала
+    // 2. Устанавливаем обработчик для отправки ответного сигнала.
         peer.on("signal", signal => {
             socketRef.current.emit("returning signal", { signal, callerId });
         });
 
-        // 3. Обрабатываем входящий сигнал
-        peer.signal(incomingSignal);
+        // === КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: МЕНЯЕМ ПОРЯДОК ===
 
-        // 4. ЯВНО добавляем наши аудиодорожки ПОСЛЕ обработки сигнала
+        // 3. СНАЧАЛА добавляем наши дорожки. 
+        // Теперь peer знает, что мы собираемся отправлять аудио.
         stream.getTracks().forEach(track => {
             peer.addTrack(track, stream);
         });
+
+        // 4. И только ТЕПЕРЬ обрабатываем входящий сигнал.
+        // Peer сгенерирует ответ (Answer), который будет включать информацию о наших дорожках.
+        peer.signal(incomingSignal);
 
         return peer;
     }
