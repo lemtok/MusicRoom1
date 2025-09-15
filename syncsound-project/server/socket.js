@@ -1,61 +1,52 @@
 const Room = require('./models/Room');
 
 module.exports = (io) => {
-    const usersInRooms = {}; // Хранилище пользователей { roomId: [{ socketId, user }] }
+    // Хранилище в памяти для отслеживания пользователей в комнатах
+    // Формат: { roomId: [ { socketId, user }, ... ] }
+    const usersInRooms = {};
 
     io.on('connection', (socket) => {
         console.log(`Новое WebSocket соединение: ${socket.id}`);
 
         // --- ОБРАБОТЧИК ВХОДА В КОМНАТУ ---
         socket.on('joinRoom', async ({ roomId, user }) => {
-            try {
-                // 1. Присоединяем сокет к комнате
-                socket.join(roomId);
-                console.log(`Пользователь ${user.name} (${socket.id}) присоединился к комнате ${roomId}`);
+            if (!user) return; // Защита от входа без данных пользователя
 
-                // 2. Инициализируем хранилище для комнаты, если его нет
-                if (!usersInRooms[roomId]) {
-                    usersInRooms[roomId] = [];
-                }
+            socket.join(roomId);
 
-                // 3. Отправляем НОВОМУ пользователю список всех, кто УЖЕ в комнате
-                const existingUsers = usersInRooms[roomId];
-                socket.emit('all users', existingUsers);
-
-                // 4. УВЕДОМЛЯЕМ ВСЕХ СТАРЫХ участников о том, что пришел новичок
-                // Это ключевой исправленный шаг!
-                socket.to(roomId).emit('user joined', {
-                    callerId: socket.id,
-                    user: user
-                });
-
-                // 5. Добавляем нового пользователя в список для этой комнаты
-                usersInRooms[roomId].push({ socketId: socket.id, user });
-
-            } catch (error) {
-                console.error(`Ошибка при входе в комнату ${roomId}:`, error);
+            if (!usersInRooms[roomId]) {
+                usersInRooms[roomId] = [];
             }
+
+            // 1. Отправляем НОВОМУ пользователю список всех, кто УЖЕ в комнате.
+            //    Он будет инициатором соединений с ними.
+            socket.emit('all users', usersInRooms[roomId]);
+
+            // 2. Добавляем нового пользователя в список для этой комнаты.
+            usersInRooms[roomId].push({ socketId: socket.id, user });
         });
 
-        // --- ЛОГИКА СИГНАЛИНГА (ПЕРЕДАЧА WEBRTC ДАННЫХ) ---
-        // Сервер здесь просто почтальон - он ничего не меняет, только пересылает.
 
-        // Событие от инициатора (новичка) к существующему участнику
+        // --- ЛОГИКА СИГНАЛИНГА (ПРОСТОЙ ПОЧТАЛЬОН) ---
+        // Сервер просто пересылает сигналы от одного клиента другому.
+
+        // Инициатор (обычно новичок) отправляет сигнал существующему участнику.
         socket.on('sending signal', payload => {
-            io.to(payload.userToSignal).emit('receiving signal', {
+            io.to(payload.userToSignal).emit('user joined', {
                 signal: payload.signal,
                 callerId: payload.callerId,
                 user: payload.user
             });
         });
 
-        // Ответное событие от существующего участника к инициатору (новичку)
+        // Существующий участник отправляет ответный сигнал инициатору.
         socket.on('returning signal', payload => {
             io.to(payload.callerId).emit('receiving returned signal', {
                 signal: payload.signal,
                 id: socket.id
             });
         });
+
 
         // --- ОБРАБОТЧИК ОТКЛЮЧЕНИЯ ---
         socket.on('disconnect', () => {
@@ -70,11 +61,13 @@ module.exports = (io) => {
                 }
             }
             if (roomID) {
+                // Уведомляем всех оставшихся, что пользователь ушел.
                 io.to(roomID).emit('user left', socket.id);
             }
         });
 
-        // --- СТАРАЯ ЛОГИКА ДЛЯ ПЛЕЕРА (остается без изменений) ---
+
+        // --- ЛОГИКА ДЛЯ ПЛЕЕРА И ЧАТА (остается без изменений) ---
         socket.on('chatMessage', ({ roomId, user, message }) => {
             io.to(roomId).emit('newMessage', { user: { _id: user._id, name: user.name }, message });
         });

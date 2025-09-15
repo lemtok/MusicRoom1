@@ -5,18 +5,14 @@ import ReactPlayer from 'react-player';
 import API from '../services/api';
 import Peer from 'simple-peer';
 
-// Переименованный и улучшенный компонент для отображения участника (и себя, и других)
+// Компонент для отображения участника (остается без изменений, он корректен)
 const ParticipantView = ({ peer, stream: localStream, user, isMuted }) => {
     const audioRef = useRef();
     const [audioLevel, setAudioLevel] = useState(0);
 
     useEffect(() => {
         const setupVisualizer = (stream) => {
-            // Визуализацию звука выключаем, только если это локальный пользователь (мы сами)
-            if (isMuted && localStream) {
-                setAudioLevel(0);
-                return;
-            }
+            if (isMuted && localStream) { setAudioLevel(0); return; }
             try {
                 const audioContext = new (window.AudioContext || window.webkitAudioContext)();
                 const source = audioContext.createMediaStreamSource(stream);
@@ -26,7 +22,6 @@ const ParticipantView = ({ peer, stream: localStream, user, isMuted }) => {
                 const dataArray = new Uint8Array(bufferLength);
                 source.connect(analyser);
                 let animationFrameId;
-
                 const getAudioLevel = () => {
                     analyser.getByteFrequencyData(dataArray);
                     let sum = dataArray.reduce((a, b) => a + b, 0);
@@ -35,60 +30,34 @@ const ParticipantView = ({ peer, stream: localStream, user, isMuted }) => {
                     animationFrameId = requestAnimationFrame(getAudioLevel);
                 };
                 getAudioLevel();
-
-                return () => { // Функция очистки
+                return () => {
                     cancelAnimationFrame(animationFrameId);
                     source.disconnect();
                     analyser.disconnect();
-                    audioContext.close().catch(e => console.error("Не удалось закрыть AudioContext", e));
+                    audioContext.close().catch(e => {});
                 };
-            } catch (e) { console.error('Ошибка создания AudioContext:', e); }
+            } catch (e) { console.error('AudioContext Error:', e); }
         };
 
-        if (peer) { // --- Логика для ДРУГИХ участников ---
+        if (peer) {
             const handleStream = remoteStream => {
-                if (audioRef.current) {
-                    audioRef.current.srcObject = remoteStream;
-                    audioRef.current.play().catch(error => console.error("Ошибка автовоспроизведения:", error));
-                }
+                if (audioRef.current) { audioRef.current.srcObject = remoteStream; audioRef.current.play().catch(e => {}); }
                 setupVisualizer(remoteStream);
             };
-
-            // === КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ "СОСТОЯНИЯ ГОНКИ" ===
-            // Проверяем, не пришел ли поток ДО того, как компонент отрисовался
-            if (peer.streams[0]) {
-                handleStream(peer.streams[0]); // Если поток уже здесь, обрабатываем его
-            } else {
-                peer.on("stream", handleStream); // Иначе, подписываемся и ждем события 'stream'
-            }
-            // === КОНЕЦ ИСПРАВЛЕНИЯ ===
-
-            // Очистка слушателя при размонтировании
-            return () => {
-                peer.off("stream", handleStream);
-            }
-
-        } else if (localStream) { // --- Логика для СЕБЯ (локального пользователя) ---
+            if (peer.streams[0]) { handleStream(peer.streams[0]); } else { peer.on("stream", handleStream); }
+            return () => { peer.off("stream", handleStream); }
+        } else if (localStream) {
             const cleanup = setupVisualizer(localStream);
             return cleanup;
         }
-
     }, [peer, localStream, user, isMuted]);
 
-    const audioLevelStyle = {
-        ...styles.audioLevel,
-        width: `${Math.min(100, audioLevel * 2)}%`,
-        // Стиль меняется на серый только для локального пользователя при выключении микрофона
-        backgroundColor: (isMuted && localStream) ? '#6c757d' : '#28a745'
-    };
+    const audioLevelStyle = { ...styles.audioLevel, width: `${Math.min(100, audioLevel * 2)}%`, backgroundColor: (isMuted && localStream) ? '#6c757d' : '#28a745' };
 
     return (
         <div style={styles.participant}>
-            {/* Аудиоэлемент для прослушивания нужен только для других участников */}
             {peer && <audio playsInline autoPlay ref={audioRef} />}
-            <div style={styles.audioVisualizer}>
-                <div style={audioLevelStyle}></div>
-            </div>
+            <div style={styles.audioVisualizer}><div style={audioLevelStyle}></div></div>
             <span>{user?.name || 'Гость'} {localStream ? '(Вы)' : ''}</span>
         </div>
     );
@@ -122,13 +91,45 @@ const RoomPage = () => {
     
     const isHost = userInfo?._id === room?.host;
     
+    // --- ФИНАЛЬНАЯ РАБОЧАЯ ВЕРСИЯ `createPeer` ---
+    function createPeer(userToSignal, callerId, stream, user) {
+        const peer = new Peer({
+            initiator: true,
+            trickle: false,
+            stream: stream,
+            config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }] }
+        });
+        peer.on("signal", signal => {
+            socketRef.current.emit("sending signal", { userToSignal, callerId, signal, user });
+        });
+        return peer;
+    }
+
+    // --- ФИНАЛЬНАЯ РАБОЧАЯ ВЕРСИЯ `addPeer` ---
+    function addPeer(incomingSignal, callerId, stream, user) {
+        const peer = new Peer({
+            initiator: false,
+            trickle: false,
+            stream: stream,
+            config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }] }
+        });
+        peer.on("signal", signal => {
+            socketRef.current.emit("returning signal", { signal, callerId });
+        });
+        peer.signal(incomingSignal);
+        return peer;
+    }
+
     useEffect(() => {
         const storedUserInfo = localStorage.getItem('userInfo');
         if (!storedUserInfo) { navigate('/login'); return; }
         const parsedInfo = JSON.parse(storedUserInfo);
         setUserInfo(parsedInfo);
 
-        const fetchRoomData = async () => {
+        const socket = io('https://syncsound-backend.onrender.com');
+        socketRef.current = socket;
+
+        const setupRoom = async () => {
             try {
                 const config = { headers: { Authorization: `Bearer ${parsedInfo.token}` } };
                 const { data } = await API.get(`/api/rooms/${roomId}`, config);
@@ -136,59 +137,61 @@ const RoomPage = () => {
                 setQueue(data.queue || []);
                 setCurrentTrack(data.currentTrack || null);
                 setIsPlaying(data.isPlaying || false);
+
+                const stream = await navigator.mediaDevices.getUserMedia({ video: false, audio: true });
+                userStreamRef.current = stream;
+                setLoading(false); // Показываем контент только после получения стрима
+                
+                socket.emit('joinRoom', { roomId, user: parsedInfo });
+
+                // --- ФИНАЛЬНАЯ РАБОЧАЯ ЛОГИКА СОКЕТОВ ---
+                socket.on('all users', users => {
+                    const newPeers = [];
+                    users.forEach(u => {
+                        const peer = createPeer(u.socketId, socket.id, stream, parsedInfo);
+                        peersRef.current.push({ peerId: u.socketId, peer });
+                        newPeers.push({ peerId: u.socketId, peer, user: u.user });
+                    });
+                    setPeers(newPeers);
+                });
+
+                socket.on('user joined', payload => {
+                    // Проверяем, чтобы не создавать дубликат соединения с самим собой или существующим пиром
+                    if (peersRef.current.find(p => p.peerId === payload.callerId)) {
+                        return;
+                    }
+                    const peer = addPeer(payload.signal, payload.callerId, stream, payload.user);
+                    peersRef.current.push({ peerId: payload.callerId, peer });
+                    setPeers(currentPeers => [...currentPeers, { peerId: payload.callerId, peer, user: payload.user }]);
+                });
+
+                socket.on('receiving returned signal', payload => {
+                    const item = peersRef.current.find(p => p.peerId === payload.id);
+                    if (item) {
+                        item.peer.signal(payload.signal);
+                    }
+                });
+
+                socket.on('user left', id => {
+                    const peerObj = peersRef.current.find(p => p.peerId === id);
+                    if (peerObj) {
+                        peerObj.peer.destroy();
+                    }
+                    const newPeers = peersRef.current.filter(p => p.peerId !== id);
+                    peersRef.current = newPeers;
+                    setPeers(newPeers);
+                });
+
             } catch (err) {
-                setError(err.response?.data?.message || 'Не удалось загрузить данные комнаты');
-            } finally {
+                console.error("Ошибка инициализации комнаты:", err);
+                setError("Не удалось войти в комнату или получить доступ к микрофону. Проверьте разрешения и обновите страницу.");
                 setLoading(false);
             }
         };
-        fetchRoomData();
 
-        socketRef.current = io('https://syncsound-backend.onrender.com');
-        const socket = socketRef.current;
-
-        navigator.mediaDevices.getUserMedia({ video: false, audio: true }).then(stream => {
-            userStreamRef.current = stream;
-            
-            socket.emit('joinRoom', { roomId, user: parsedInfo });
-            
-            socket.on('all users', users => {
-                const newPeers = [];
-                users.forEach(u => {
-                    const peer = createPeer(u.socketId, socket.id, stream, parsedInfo);
-                    peersRef.current.push({ peerId: u.socketId, peer });
-                    newPeers.push({ peerId: u.socketId, peer, user: u.user });
-                });
-                setPeers(newPeers);
-            });
-
-        // Когда я (старичок) уже в комнате, и ко мне заходит новичок.
-        // Сервер присылает мне его данные. Я должен принять его звонок.
-            socket.on('receiving signal', payload => {
-                const peer = addPeer(payload.signal, payload.callerId, stream);
-                peersRef.current.push({ peerId: payload.callerId, peer });
-                setPeers(currentPeers => [...currentPeers, { peerId: payload.callerId, peer, user: payload.user }]);
-            });
-
-            // Когда я (новичок) получаю ответный сигнал от старичка, которому звонил.
-            socket.on('receiving returned signal', payload => {
-                const item = peersRef.current.find(p => p.peerId === payload.id);
-                if (item) { item.peer.signal(payload.signal); }
-            });
-
-            socket.on('user left', id => {
-                const peerObj = peersRef.current.find(p => p.peerId === id);
-                if(peerObj) { peerObj.peer.destroy(); }
-                const newPeers = peersRef.current.filter(p => p.peerId !== id);
-                peersRef.current = newPeers;
-                setPeers(newPeers);
-            });
-        }).catch(err => {
-            console.error("Ошибка доступа к микрофону:", err);
-            setError("Необходим доступ к микрофону для входа в аудиочат. Пожалуйста, обновите страницу и разрешите доступ.");
-        });
+        setupRoom();
         
-        socket.on('userJoined', (message) => { setSystemMessage(message); setTimeout(() => setSystemMessage(''), 3000); });
+        // Обработчики чата и плеера
         socket.on('newMessage', (messageData) => setMessages((prev) => [...prev, messageData]));
         socket.on('queueUpdated', (newQueue) => setQueue(newQueue));
         socket.on('playerStateChanged', ({ isPlaying }) => setIsPlaying(isPlaying));
@@ -206,58 +209,7 @@ const RoomPage = () => {
         };
     }, [roomId, navigate]);
 
-    function createPeer(userToSignal, callerId, stream, user) {
-    // Создаем peer, СРАЗУ передавая ему наш аудиопоток
-        const peer = new Peer({
-            initiator: true,
-            trickle: false,
-            stream: stream, // ВОЗВРАЩАЕМ поток в конструктор
-            config: { 
-                iceServers: [
-                    { urls: 'stun:stun.l.google.com:19302' },
-                    { urls: 'stun:stun1.l.google.com:1932' } // Примечание: исправил опечатку в порту для надежности
-                ] 
-            }
-        });
-
-        peer.on("signal", signal => {
-            socketRef.current.emit("sending signal", { userToSignal, callerId, signal, user });
-        });
-
-        // УБИРАЕМ все вызовы peer.addTrack()
-        return peer;
-    }
-    function addPeer(incomingSignal, callerId, stream) {
-        // 1. Принимающий создает peer БЕЗ своего потока. Он только слушает.
-        const peer = new Peer({
-            initiator: false,
-            trickle: false,
-            // stream: stream, // УБИРАЕМ ЭТО НАВСЕГДА!
-            config: { 
-                iceServers: [
-                    { urls: 'stun:stun.l.google.com:19302' },
-                    { urls: 'stun:stun1.l.google.com:19302' }
-                ] 
-            }
-        });
-
-        // 2. Устанавливаем обработчик для отправки ответного сигнала.
-        peer.on("signal", signal => {
-            socketRef.current.emit("returning signal", { signal, callerId });
-        });
-
-        // 3. (НОВАЯ ЛОГИКА) Когда мы успешно получим поток от инициатора...
-        peer.on('stream', remoteStream => {
-            // ...только тогда мы добавляем свой собственный поток для отправки в ответ.
-            peer.addStream(stream);
-        });
-
-        // 4. Обрабатываем входящий сигнал, чтобы запустить процесс.
-        peer.signal(incomingSignal);
-
-        return peer;
-    }
-
+    // --- ВСЕ ОСТАЛЬНЫЕ ФУНКЦИИ-ОБРАБОТЧИКИ ОСТАЮТСЯ БЕЗ ИЗМЕНЕНИЙ ---
     const handleMute = () => {
         if (userStreamRef.current) {
             const isNowMuted = !isMuted;
@@ -289,6 +241,7 @@ const RoomPage = () => {
     if (loading) return <div>Загрузка...</div>;
     if (error) return <div style={{color: 'red', padding: '2rem'}}>{error}</div>;
 
+    // --- JSX ОСТАЕТСЯ БЕЗ ИЗМЕНЕНИЙ ---
     return (
         <div style={styles.container}>
             <h2>Комната: {room?.name}</h2>
@@ -352,11 +305,9 @@ const RoomPage = () => {
                     </div>
                 </div>
                 <div style={styles.chatSection}>
-                    {/* === ИЗМЕНЕННЫЙ БЛОК === */}
                     <div style={styles.voiceControls}>
                         <h4>Участники в аудиочате:</h4>
                         
-                        {/* Отображаем себя с помощью нового компонента */}
                         {userStreamRef.current && (
                             <ParticipantView 
                                 user={userInfo} 
@@ -365,7 +316,6 @@ const RoomPage = () => {
                             />
                         )}
 
-                        {/* Отображаем других участников */}
                         {peers.map((p) => (
                             <ParticipantView 
                                 key={p.peerId} 
@@ -385,8 +335,6 @@ const RoomPage = () => {
                             </div>
                         ) : <p style={{color: 'red'}}>Доступ к микрофону не предоставлен.</p>}
                     </div>
-                    {/* === КОНЕЦ ИЗМЕНЕННОГО БЛОКА === */}
-
                     <h3>Чат</h3>
                     <div style={styles.chatBox}>
                         {messages.map((msg, index) => (<div key={index} style={styles.message}>
