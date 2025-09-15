@@ -228,27 +228,33 @@ const RoomPage = () => {
         return peer;
     }
     function addPeer(incomingSignal, callerId, stream) {
-    // Создаем peer точно так же, СРАЗУ передавая ему наш аудиопоток
+        // 1. Принимающий создает peer БЕЗ своего потока. Он только слушает.
         const peer = new Peer({
             initiator: false,
             trickle: false,
-            stream: stream, // ВОЗВРАЩАЕМ поток в конструктор
+            // stream: stream, // УБИРАЕМ ЭТО НАВСЕГДА!
             config: { 
                 iceServers: [
                     { urls: 'stun:stun.l.google.com:19302' },
-                    { urls: 'stun:stun1.l.google.com:1932' }
+                    { urls: 'stun:stun1.l.google.com:19302' }
                 ] 
             }
         });
 
+        // 2. Устанавливаем обработчик для отправки ответного сигнала.
         peer.on("signal", signal => {
             socketRef.current.emit("returning signal", { signal, callerId });
         });
 
-        // Сначала обрабатываем входящий сигнал
+        // 3. (НОВАЯ ЛОГИКА) Когда мы успешно получим поток от инициатора...
+        peer.on('stream', remoteStream => {
+            // ...только тогда мы добавляем свой собственный поток для отправки в ответ.
+            peer.addStream(stream);
+        });
+
+        // 4. Обрабатываем входящий сигнал, чтобы запустить процесс.
         peer.signal(incomingSignal);
-        
-        // УБИРАЕМ все вызовы peer.addTrack()
+
         return peer;
     }
 
