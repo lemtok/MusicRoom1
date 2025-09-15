@@ -12,7 +12,11 @@ const ParticipantView = ({ peer, stream: localStream, user, isMuted, isCurrentUs
 
     useEffect(() => {
         const setupVisualizer = (stream) => {
-            if (isMuted && localStream) { setAudioLevel(0); return; }
+            if (isMuted && isCurrentUser) { 
+                setAudioLevel(0); 
+                return; 
+            }
+            
             try {
                 const audioContext = new (window.AudioContext || window.webkitAudioContext)();
                 const source = audioContext.createMediaStreamSource(stream);
@@ -21,6 +25,7 @@ const ParticipantView = ({ peer, stream: localStream, user, isMuted, isCurrentUs
                 const bufferLength = analyser.frequencyBinCount;
                 const dataArray = new Uint8Array(bufferLength);
                 source.connect(analyser);
+                
                 let animationFrameId;
                 const getAudioLevel = () => {
                     analyser.getByteFrequencyData(dataArray);
@@ -30,53 +35,70 @@ const ParticipantView = ({ peer, stream: localStream, user, isMuted, isCurrentUs
                     animationFrameId = requestAnimationFrame(getAudioLevel);
                 };
                 getAudioLevel();
+                
                 return () => {
                     cancelAnimationFrame(animationFrameId);
                     source.disconnect();
                     analyser.disconnect();
                     audioContext.close().catch(e => {});
                 };
-            } catch (e) { console.error('AudioContext Error:', e); }
+            } catch (e) { 
+                console.error('AudioContext Error:', e); 
+            }
         };
 
-        if (peer && !isCurrentUser) {
-            // Только для удаленных участников - проигрываем аудио и показываем визуализацию
-            const handleStream = remoteStream => {
+        if (!isCurrentUser && peer) {
+            // Для удаленных участников - получаем их поток и проигрываем
+            const handleRemoteStream = remoteStream => {
+                console.log(`Получен удаленный поток от пользователя ${user?.name}`);
                 if (audioRef.current) { 
-                    audioRef.current.srcObject = remoteStream; 
+                    audioRef.current.srcObject = remoteStream;
+                    audioRef.current.volume = 1.0; // Максимальная громкость для других участников
                     audioRef.current.play().catch(e => {
-                        console.log('Auto-play prevented, user interaction required');
+                        console.log('Auto-play prevented for remote stream, user interaction required');
                     }); 
                 }
-                setupVisualizer(remoteStream);
+                const cleanup = setupVisualizer(remoteStream);
+                return cleanup;
             };
-            if (peer.streams[0]) { 
-                handleStream(peer.streams[0]); 
+            
+            if (peer.streams && peer.streams[0]) { 
+                return handleRemoteStream(peer.streams[0]); 
             } else { 
-                peer.on("stream", handleStream); 
+                peer.on("stream", handleRemoteStream);
+                return () => { peer.off("stream", handleRemoteStream); }
             }
-            return () => { peer.off("stream", handleStream); }
-        } else if (localStream && isCurrentUser) {
-            // Только для текущего пользователя - показываем визуализацию, но НЕ проигрываем аудио
-            const cleanup = setupVisualizer(localStream);
-            return cleanup;
+        } else if (isCurrentUser && localStream) {
+            // Для текущего пользователя - показываем только визуализацию
+            console.log(`Настройка визуализации для текущего пользователя ${user?.name}`);
+            return setupVisualizer(localStream);
         }
     }, [peer, localStream, user, isMuted, isCurrentUser]);
 
     const audioLevelStyle = { 
         ...styles.audioLevel, 
         width: `${Math.min(100, audioLevel * 2)}%`, 
-        backgroundColor: (isMuted && localStream) ? '#6c757d' : '#28a745' 
+        backgroundColor: (isMuted && isCurrentUser) ? '#6c757d' : '#28a745' 
     };
 
     return (
         <div style={styles.participant}>
             {/* Аудио элемент ТОЛЬКО для удаленных участников */}
-            {peer && !isCurrentUser && <audio playsInline autoPlay ref={audioRef} />}
+            {!isCurrentUser && peer && (
+                <audio 
+                    playsInline 
+                    autoPlay 
+                    ref={audioRef}
+                    style={{ display: 'none' }} // Скрываем элемент управления
+                />
+            )}
             <div style={styles.audioVisualizer}>
                 <div style={audioLevelStyle}></div>
             </div>
-            <span>{user?.name || 'Гость'} {isCurrentUser ? '(Вы)' : ''}</span>
+            <span>
+                {user?.name || 'Гость'} {isCurrentUser ? '(Вы)' : ''}
+                {isMuted && isCurrentUser && ' - Микрофон выключен'}
+            </span>
         </div>
     );
 };
@@ -108,8 +130,9 @@ const RoomPage = () => {
     
     const isHost = userInfo?._id === room?.host;
     
-    // Создание peer для исходящих соединений (когда мы инициируем)
+    // Создание peer для исходящих соединений (мы инициируем к существующим пользователям)
     function createPeer(userToSignal, callerId, stream, user) {
+        console.log(`Создаем исходящий peer к пользователю ${userToSignal}`);
         const peer = new Peer({
             initiator: true,
             trickle: false,
@@ -123,14 +146,24 @@ const RoomPage = () => {
         });
         
         peer.on("signal", signal => {
+            console.log(`Отправляем сигнал от ${callerId} к ${userToSignal}`);
             socketRef.current.emit("sending signal", { userToSignal, callerId, signal, user });
+        });
+        
+        peer.on("connect", () => {
+            console.log(`Peer соединение установлено с ${userToSignal}`);
+        });
+        
+        peer.on("error", (err) => {
+            console.error(`Ошибка peer соединения с ${userToSignal}:`, err);
         });
         
         return peer;
     }
 
-    // Создание peer для входящих соединений (когда к нам подключаются)
+    // Создание peer для входящих соединений (к нам подключается новый пользователь)
     function addPeer(incomingSignal, callerId, stream, user) {
+        console.log(`Создаем входящий peer для пользователя ${callerId}`);
         const peer = new Peer({
             initiator: false,
             trickle: false,
@@ -144,7 +177,16 @@ const RoomPage = () => {
         });
         
         peer.on("signal", signal => {
+            console.log(`Отправляем ответный сигнал от ${socketRef.current.id} к ${callerId}`);
             socketRef.current.emit("returning signal", { signal, callerId });
+        });
+        
+        peer.on("connect", () => {
+            console.log(`Peer соединение установлено с ${callerId}`);
+        });
+        
+        peer.on("error", (err) => {
+            console.error(`Ошибка peer соединения с ${callerId}:`, err);
         });
         
         peer.signal(incomingSignal);
@@ -169,46 +211,49 @@ const RoomPage = () => {
                 setCurrentTrack(data.currentTrack || null);
                 setIsPlaying(data.isPlaying || false);
 
-                // Получаем медиа-поток с микрофона
+                // Получаем медиа-поток с микрофона с улучшенными настройками
                 const stream = await navigator.mediaDevices.getUserMedia({ 
                     video: false, 
                     audio: {
                         echoCancellation: true,
                         noiseSuppression: true,
-                        autoGainControl: true
+                        autoGainControl: true,
+                        sampleRate: 44100
                     }
                 });
                 userStreamRef.current = stream;
+                console.log(`Получен локальный медиа-поток для пользователя ${parsedInfo.name}`);
+                
                 setLoading(false);
                 
                 // Присоединяемся к комнате
                 socket.emit('joinRoom', { roomId, user: parsedInfo });
 
-                // Обработчик для получения списка уже подключенных пользователей
+                // Получаем список уже подключенных пользователей
                 socket.on('all users', users => {
+                    console.log(`Получен список существующих пользователей:`, users.map(u => u.socketId));
                     const newPeers = [];
                     users.forEach(userInRoom => {
-                        // Не создаем соединение с самим собой
-                        if (userInRoom.socketId !== socket.id) {
-                            const peer = createPeer(userInRoom.socketId, socket.id, stream, parsedInfo);
-                            peersRef.current.push({ peerId: userInRoom.socketId, peer });
-                            newPeers.push({ 
-                                peerId: userInRoom.socketId, 
-                                peer, 
-                                user: userInRoom.user 
-                            });
-                        }
+                        // Создаем peer-соединение с каждым существующим пользователем
+                        const peer = createPeer(userInRoom.socketId, socket.id, stream, parsedInfo);
+                        peersRef.current.push({ peerId: userInRoom.socketId, peer });
+                        newPeers.push({ 
+                            peerId: userInRoom.socketId, 
+                            peer, 
+                            user: userInRoom.user 
+                        });
                     });
                     setPeers(newPeers);
                 });
 
-                // Обработчик для нового пользователя, который к нам подключается
+                // Новый пользователь хочет подключиться к нам
                 socket.on('user joined', payload => {
-                    // Не создаем соединение с самим собой
-                    if (payload.callerId === socket.id) return;
+                    console.log(`Новый пользователь ${payload.callerId} подключается к нам`);
                     
                     // Проверяем, нет ли уже соединения с этим пользователем
-                    if (peersRef.current.find(p => p.peerId === payload.callerId)) {
+                    const existingPeer = peersRef.current.find(p => p.peerId === payload.callerId);
+                    if (existingPeer) {
+                        console.log(`Peer с ${payload.callerId} уже существует, игнорируем`);
                         return;
                     }
                     
@@ -221,16 +266,20 @@ const RoomPage = () => {
                     }]);
                 });
 
-                // Обработчик для получения ответного сигнала
+                // Получаем ответный сигнал от пользователя, к которому мы подключались
                 socket.on('receiving returned signal', payload => {
-                    const item = peersRef.current.find(p => p.peerId === payload.id);
-                    if (item) {
-                        item.peer.signal(payload.signal);
+                    console.log(`Получен ответный сигнал от ${payload.id}`);
+                    const peerItem = peersRef.current.find(p => p.peerId === payload.id);
+                    if (peerItem) {
+                        peerItem.peer.signal(payload.signal);
+                    } else {
+                        console.warn(`Не найден peer для ID ${payload.id}`);
                     }
                 });
 
-                // Обработчик отключения пользователя
+                // Пользователь покинул комнату
                 socket.on('user left', id => {
+                    console.log(`Пользователь ${id} покинул комнату`);
                     const peerObj = peersRef.current.find(p => p.peerId === id);
                     if (peerObj) {
                         peerObj.peer.destroy();
@@ -238,6 +287,13 @@ const RoomPage = () => {
                     const newPeers = peersRef.current.filter(p => p.peerId !== id);
                     peersRef.current = newPeers;
                     setPeers(newPeers);
+                });
+
+                // Уведомление о новом пользователе (для чата)
+                socket.on('user joined notification', ({ newUser, message }) => {
+                    console.log(message);
+                    setSystemMessage(message);
+                    setTimeout(() => setSystemMessage(''), 3000);
                 });
 
             } catch (err) {
@@ -260,24 +316,46 @@ const RoomPage = () => {
         });
 
         return () => {
-            socket.disconnect();
+            console.log('Очистка ресурсов при размонтировании');
+            // Закрываем все peer соединения
+            peersRef.current.forEach(({ peer }) => {
+                peer.destroy();
+            });
+            
+            // Останавливаем медиа-поток
             if (userStreamRef.current) {
                 userStreamRef.current.getTracks().forEach(track => track.stop());
             }
+            
+            socket.disconnect();
         };
     }, [roomId, navigate]);
 
     const handleMute = () => {
         if (userStreamRef.current) {
             const isNowMuted = !isMuted;
-            userStreamRef.current.getAudioTracks()[0].enabled = !isNowMuted;
-            setIsMuted(isNowMuted);
+            const audioTrack = userStreamRef.current.getAudioTracks()[0];
+            if (audioTrack) {
+                audioTrack.enabled = !isNowMuted;
+                setIsMuted(isNowMuted);
+                console.log(`Микрофон ${isNowMuted ? 'выключен' : 'включен'}`);
+            }
         }
     };
 
     const handleLeaveRoom = () => { navigate('/'); };
-    const addToQueueHandler = (track) => { socketRef.current.emit('addTrackToQueue', { roomId, trackData: track, user: userInfo }); };
-    const sendMessageHandler = (e) => { e.preventDefault(); if (newMessage.trim() && userInfo) { socketRef.current.emit('chatMessage', { roomId, user: userInfo, message: newMessage }); setNewMessage(''); } };
+    
+    const addToQueueHandler = (track) => { 
+        socketRef.current.emit('addTrackToQueue', { roomId, trackData: track, user: userInfo }); 
+    };
+    
+    const sendMessageHandler = (e) => { 
+        e.preventDefault(); 
+        if (newMessage.trim() && userInfo) { 
+            socketRef.current.emit('chatMessage', { roomId, user: userInfo, message: newMessage }); 
+            setNewMessage(''); 
+        } 
+    };
     
     const searchHandler = async (e) => {
         e.preventDefault();
