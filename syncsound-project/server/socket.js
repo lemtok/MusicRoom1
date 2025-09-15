@@ -1,22 +1,36 @@
 const Room = require('./models/Room');
 
 module.exports = (io) => {
+    // Хранилище в памяти для отслеживания пользователей в комнатах
+    // Формат: { roomId: [ { socketId, user }, ... ] }
     const usersInRooms = {};
 
     io.on('connection', (socket) => {
+        console.log(`Новое WebSocket соединение: ${socket.id}`);
+
+        // --- ОБРАБОТЧИК ВХОДА В КОМНАТУ ---
         socket.on('joinRoom', async ({ roomId, user }) => {
-            if (!user) return;
+            if (!user) return; // Защита от входа без данных пользователя
+
             socket.join(roomId);
 
             if (!usersInRooms[roomId]) {
                 usersInRooms[roomId] = [];
             }
-            
+
+            // 1. Отправляем НОВОМУ пользователю список всех, кто УЖЕ в комнате.
+            //    Он будет инициатором соединений с ними.
             socket.emit('all users', usersInRooms[roomId]);
 
+            // 2. Добавляем нового пользователя в список для этой комнаты.
             usersInRooms[roomId].push({ socketId: socket.id, user });
         });
 
+
+        // --- ЛОГИКА СИГНАЛИНГА (ПРОСТОЙ ПОЧТАЛЬОН) ---
+        // Сервер просто пересылает сигналы от одного клиента другому.
+
+        // Инициатор (обычно новичок) отправляет сигнал существующему участнику.
         socket.on('sending signal', payload => {
             io.to(payload.userToSignal).emit('user joined', {
                 signal: payload.signal,
@@ -25,6 +39,7 @@ module.exports = (io) => {
             });
         });
 
+        // Существующий участник отправляет ответный сигнал инициатору.
         socket.on('returning signal', payload => {
             io.to(payload.callerId).emit('receiving returned signal', {
                 signal: payload.signal,
@@ -32,7 +47,10 @@ module.exports = (io) => {
             });
         });
 
+
+        // --- ОБРАБОТЧИК ОТКЛЮЧЕНИЯ ---
         socket.on('disconnect', () => {
+            console.log(`Соединение разорвано: ${socket.id}`);
             let roomID;
             for (const id in usersInRooms) {
                 const userIndex = usersInRooms[id].findIndex(u => u.socketId === socket.id);
@@ -43,14 +61,45 @@ module.exports = (io) => {
                 }
             }
             if (roomID) {
+                // Уведомляем всех оставшихся, что пользователь ушел.
                 io.to(roomID).emit('user left', socket.id);
             }
         });
 
-        // --- Остальные обработчики без изменений ---
-        socket.on('chatMessage', ({ roomId, user, message }) => { io.to(roomId).emit('newMessage', { user: { _id: user._id, name: user.name }, message }); });
-        socket.on('addTrackToQueue', async ({ roomId, trackData, user }) => { const room = await Room.findById(roomId); if (room) { const newTrack = { ...trackData, addedBy: { _id: user._id, name: user.name } }; room.queue.push(newTrack); await room.save(); io.to(roomId).emit('queueUpdated', room.queue); } });
-        socket.on('togglePlay', async ({ roomId, isPlaying }) => { try { await Room.findByIdAndUpdate(roomId, { isPlaying }); io.to(roomId).emit('playerStateChanged', { isPlaying }); } catch (error) { console.error('Ошибка togglePlay:', error); } });
-        socket.on('playNextTrack', async ({ roomId }) => { try { const room = await Room.findById(roomId); if (room) { room.currentTrack = room.queue.length > 0 ? room.queue.shift() : null; room.isPlaying = !!room.currentTrack; await room.save(); io.to(roomId).emit('newTrackPlaying', { currentTrack: room.currentTrack, isPlaying: room.isPlaying, queue: room.queue }); } } catch (error) { console.error('Ошибка переключения трека:', error); } });
+
+        // --- ЛОГИКА ДЛЯ ПЛЕЕРА И ЧАТА (остается без изменений) ---
+        socket.on('chatMessage', ({ roomId, user, message }) => {
+            io.to(roomId).emit('newMessage', { user: { _id: user._id, name: user.name }, message });
+        });
+        socket.on('addTrackToQueue', async ({ roomId, trackData, user }) => {
+            const room = await Room.findById(roomId);
+            if (room) {
+                const newTrack = { ...trackData, addedBy: { _id: user._id, name: user.name } };
+                room.queue.push(newTrack);
+                await room.save();
+                io.to(roomId).emit('queueUpdated', room.queue);
+            }
+        });
+        socket.on('togglePlay', async ({ roomId, isPlaying }) => {
+             try {
+                await Room.findByIdAndUpdate(roomId, { isPlaying });
+                io.to(roomId).emit('playerStateChanged', { isPlaying });
+            } catch (error) { console.error('Ошибка togglePlay:', error); }
+        });
+        socket.on('playNextTrack', async ({ roomId }) => {
+            try {
+                const room = await Room.findById(roomId);
+                if (room) {
+                    room.currentTrack = room.queue.length > 0 ? room.queue.shift() : null;
+                    room.isPlaying = !!room.currentTrack;
+                    await room.save();
+                    io.to(roomId).emit('newTrackPlaying', {
+                        currentTrack: room.currentTrack,
+                        isPlaying: room.isPlaying,
+                        queue: room.queue
+                    });
+                }
+            } catch (error) { console.error('Ошибка переключения трека:', error); }
+        });
     });
 };
