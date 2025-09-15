@@ -5,8 +5,8 @@ import ReactPlayer from 'react-player';
 import API from '../services/api';
 import Peer from 'simple-peer';
 
-// Компонент для отображения участника (остается без изменений, он корректен)
-const ParticipantView = ({ peer, stream: localStream, user, isMuted }) => {
+// Компонент для отображения участника
+const ParticipantView = ({ peer, stream: localStream, user, isMuted, isCurrentUser = false }) => {
     const audioRef = useRef();
     const [audioLevel, setAudioLevel] = useState(0);
 
@@ -39,30 +39,47 @@ const ParticipantView = ({ peer, stream: localStream, user, isMuted }) => {
             } catch (e) { console.error('AudioContext Error:', e); }
         };
 
-        if (peer) {
+        if (peer && !isCurrentUser) {
+            // Только для удаленных участников - проигрываем аудио и показываем визуализацию
             const handleStream = remoteStream => {
-                if (audioRef.current) { audioRef.current.srcObject = remoteStream; audioRef.current.play().catch(e => {}); }
+                if (audioRef.current) { 
+                    audioRef.current.srcObject = remoteStream; 
+                    audioRef.current.play().catch(e => {
+                        console.log('Auto-play prevented, user interaction required');
+                    }); 
+                }
                 setupVisualizer(remoteStream);
             };
-            if (peer.streams[0]) { handleStream(peer.streams[0]); } else { peer.on("stream", handleStream); }
+            if (peer.streams[0]) { 
+                handleStream(peer.streams[0]); 
+            } else { 
+                peer.on("stream", handleStream); 
+            }
             return () => { peer.off("stream", handleStream); }
-        } else if (localStream) {
+        } else if (localStream && isCurrentUser) {
+            // Только для текущего пользователя - показываем визуализацию, но НЕ проигрываем аудио
             const cleanup = setupVisualizer(localStream);
             return cleanup;
         }
-    }, [peer, localStream, user, isMuted]);
+    }, [peer, localStream, user, isMuted, isCurrentUser]);
 
-    const audioLevelStyle = { ...styles.audioLevel, width: `${Math.min(100, audioLevel * 2)}%`, backgroundColor: (isMuted && localStream) ? '#6c757d' : '#28a745' };
+    const audioLevelStyle = { 
+        ...styles.audioLevel, 
+        width: `${Math.min(100, audioLevel * 2)}%`, 
+        backgroundColor: (isMuted && localStream) ? '#6c757d' : '#28a745' 
+    };
 
     return (
         <div style={styles.participant}>
-            {peer && <audio playsInline autoPlay ref={audioRef} />}
-            <div style={styles.audioVisualizer}><div style={audioLevelStyle}></div></div>
-            <span>{user?.name || 'Гость'} {localStream ? '(Вы)' : ''}</span>
+            {/* Аудио элемент ТОЛЬКО для удаленных участников */}
+            {peer && !isCurrentUser && <audio playsInline autoPlay ref={audioRef} />}
+            <div style={styles.audioVisualizer}>
+                <div style={audioLevelStyle}></div>
+            </div>
+            <span>{user?.name || 'Гость'} {isCurrentUser ? '(Вы)' : ''}</span>
         </div>
     );
 };
-
 
 const RoomPage = () => {
     const { id: roomId } = useParams();
@@ -91,31 +108,45 @@ const RoomPage = () => {
     
     const isHost = userInfo?._id === room?.host;
     
-    // --- ФИНАЛЬНАЯ РАБОЧАЯ ВЕРСИЯ `createPeer` ---
+    // Создание peer для исходящих соединений (когда мы инициируем)
     function createPeer(userToSignal, callerId, stream, user) {
         const peer = new Peer({
             initiator: true,
             trickle: false,
             stream: stream,
-            config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }] }
+            config: { 
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' }, 
+                    { urls: 'stun:stun1.l.google.com:19302' }
+                ] 
+            }
         });
+        
         peer.on("signal", signal => {
             socketRef.current.emit("sending signal", { userToSignal, callerId, signal, user });
         });
+        
         return peer;
     }
 
-    // --- ФИНАЛЬНАЯ РАБОЧАЯ ВЕРСИЯ `addPeer` ---
+    // Создание peer для входящих соединений (когда к нам подключаются)
     function addPeer(incomingSignal, callerId, stream, user) {
         const peer = new Peer({
             initiator: false,
             trickle: false,
             stream: stream,
-            config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }] }
+            config: { 
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' }, 
+                    { urls: 'stun:stun1.l.google.com:19302' }
+                ] 
+            }
         });
+        
         peer.on("signal", signal => {
             socketRef.current.emit("returning signal", { signal, callerId });
         });
+        
         peer.signal(incomingSignal);
         return peer;
     }
@@ -138,33 +169,59 @@ const RoomPage = () => {
                 setCurrentTrack(data.currentTrack || null);
                 setIsPlaying(data.isPlaying || false);
 
-                const stream = await navigator.mediaDevices.getUserMedia({ video: false, audio: true });
+                // Получаем медиа-поток с микрофона
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: false, 
+                    audio: {
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        autoGainControl: true
+                    }
+                });
                 userStreamRef.current = stream;
-                setLoading(false); // Показываем контент только после получения стрима
+                setLoading(false);
                 
+                // Присоединяемся к комнате
                 socket.emit('joinRoom', { roomId, user: parsedInfo });
 
-                // --- ФИНАЛЬНАЯ РАБОЧАЯ ЛОГИКА СОКЕТОВ ---
+                // Обработчик для получения списка уже подключенных пользователей
                 socket.on('all users', users => {
                     const newPeers = [];
-                    users.forEach(u => {
-                        const peer = createPeer(u.socketId, socket.id, stream, parsedInfo);
-                        peersRef.current.push({ peerId: u.socketId, peer });
-                        newPeers.push({ peerId: u.socketId, peer, user: u.user });
+                    users.forEach(userInRoom => {
+                        // Не создаем соединение с самим собой
+                        if (userInRoom.socketId !== socket.id) {
+                            const peer = createPeer(userInRoom.socketId, socket.id, stream, parsedInfo);
+                            peersRef.current.push({ peerId: userInRoom.socketId, peer });
+                            newPeers.push({ 
+                                peerId: userInRoom.socketId, 
+                                peer, 
+                                user: userInRoom.user 
+                            });
+                        }
                     });
                     setPeers(newPeers);
                 });
 
+                // Обработчик для нового пользователя, который к нам подключается
                 socket.on('user joined', payload => {
-                    // Проверяем, чтобы не создавать дубликат соединения с самим собой или существующим пиром
+                    // Не создаем соединение с самим собой
+                    if (payload.callerId === socket.id) return;
+                    
+                    // Проверяем, нет ли уже соединения с этим пользователем
                     if (peersRef.current.find(p => p.peerId === payload.callerId)) {
                         return;
                     }
+                    
                     const peer = addPeer(payload.signal, payload.callerId, stream, payload.user);
                     peersRef.current.push({ peerId: payload.callerId, peer });
-                    setPeers(currentPeers => [...currentPeers, { peerId: payload.callerId, peer, user: payload.user }]);
+                    setPeers(currentPeers => [...currentPeers, { 
+                        peerId: payload.callerId, 
+                        peer, 
+                        user: payload.user 
+                    }]);
                 });
 
+                // Обработчик для получения ответного сигнала
                 socket.on('receiving returned signal', payload => {
                     const item = peersRef.current.find(p => p.peerId === payload.id);
                     if (item) {
@@ -172,6 +229,7 @@ const RoomPage = () => {
                     }
                 });
 
+                // Обработчик отключения пользователя
                 socket.on('user left', id => {
                     const peerObj = peersRef.current.find(p => p.peerId === id);
                     if (peerObj) {
@@ -209,7 +267,6 @@ const RoomPage = () => {
         };
     }, [roomId, navigate]);
 
-    // --- ВСЕ ОСТАЛЬНЫЕ ФУНКЦИИ-ОБРАБОТЧИКИ ОСТАЮТСЯ БЕЗ ИЗМЕНЕНИЙ ---
     const handleMute = () => {
         if (userStreamRef.current) {
             const isNowMuted = !isMuted;
@@ -217,10 +274,11 @@ const RoomPage = () => {
             setIsMuted(isNowMuted);
         }
     };
-    const handleLeaveRoom = () => { navigate('/'); };
 
+    const handleLeaveRoom = () => { navigate('/'); };
     const addToQueueHandler = (track) => { socketRef.current.emit('addTrackToQueue', { roomId, trackData: track, user: userInfo }); };
     const sendMessageHandler = (e) => { e.preventDefault(); if (newMessage.trim() && userInfo) { socketRef.current.emit('chatMessage', { roomId, user: userInfo, message: newMessage }); setNewMessage(''); } };
+    
     const searchHandler = async (e) => {
         e.preventDefault();
         if (!searchQuery.trim()) return;
@@ -230,9 +288,13 @@ const RoomPage = () => {
             const config = { headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${userInfo.token}` } };
             const { data } = await API.post('/api/music/search', { query: searchQuery }, config);
             setSearchResults(data);
-        } catch (err) { console.error('Ошибка поиска', err); } 
-        finally { setIsSearching(false); }
+        } catch (err) { 
+            console.error('Ошибка поиска', err); 
+        } finally { 
+            setIsSearching(false); 
+        }
     };
+    
     const handleNextTrack = () => { if (isHost) { socketRef.current.emit('playNextTrack', { roomId }); } };
     const handleTogglePlay = () => { if (isHost && currentTrack) { socketRef.current.emit('togglePlay', { roomId, isPlaying: !isPlaying }); } };
     const handleNativePlay = () => { if (isHost && !isPlaying) { socketRef.current.emit('togglePlay', { roomId, isPlaying: true }); } };
@@ -241,7 +303,6 @@ const RoomPage = () => {
     if (loading) return <div>Загрузка...</div>;
     if (error) return <div style={{color: 'red', padding: '2rem'}}>{error}</div>;
 
-    // --- JSX ОСТАЕТСЯ БЕЗ ИЗМЕНЕНИЙ ---
     return (
         <div style={styles.container}>
             <h2>Комната: {room?.name}</h2>
@@ -265,7 +326,11 @@ const RoomPage = () => {
                                     onPlay={handleNativePlay}
                                     onPause={handleNativePause}
                                 />
-                            ) : ( <div style={styles.noTrack}><span>Очередь пуста</span></div> )}
+                            ) : ( 
+                                <div style={styles.noTrack}>
+                                    <span>Очередь пуста</span>
+                                </div> 
+                            )}
                         </div>
                     </div>
                     {isHost && (
@@ -281,24 +346,46 @@ const RoomPage = () => {
                     <div style={styles.queueContainer}>
                         <h3>Очередь</h3>
                         <div style={styles.queueList}>
-                            {queue.length > 0 ? (queue.map((track, index) => (<div key={`${track.id}-${index}`} style={styles.trackItem}>
-                                <span style={styles.queueIndex}>{index + 1}.</span>
-                                <img src={track.artwork_url} alt={track.title} style={styles.trackArt}/>
-                                <div style={styles.trackInfo}><strong>{track.title}</strong><span>Добавил: {track.addedBy.name}</span></div>
-                            </div>))) : (<p>Очередь пуста.</p>)}
+                            {queue.length > 0 ? (
+                                queue.map((track, index) => (
+                                    <div key={`${track.id}-${index}`} style={styles.trackItem}>
+                                        <span style={styles.queueIndex}>{index + 1}.</span>
+                                        <img src={track.artwork_url} alt={track.title} style={styles.trackArt}/>
+                                        <div style={styles.trackInfo}>
+                                            <strong>{track.title}</strong>
+                                            <span>Добавил: {track.addedBy.name}</span>
+                                        </div>
+                                    </div>
+                                ))
+                            ) : (
+                                <p>Очередь пуста.</p>
+                            )}
                         </div>
                     </div>
                     <div style={styles.searchContainer}>
                         <form onSubmit={searchHandler}>
-                            <input type="text" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} placeholder="Название трека или исполнитель..." style={styles.searchInput}/>
-                            <button type="submit" disabled={isSearching} style={styles.searchButton}>{isSearching ? 'Поиск...' : 'Найти'}</button>
+                            <input 
+                                type="text" 
+                                value={searchQuery} 
+                                onChange={(e) => setSearchQuery(e.target.value)} 
+                                placeholder="Название трека или исполнитель..." 
+                                style={styles.searchInput}
+                            />
+                            <button type="submit" disabled={isSearching} style={styles.searchButton}>
+                                {isSearching ? 'Поиск...' : 'Найти'}
+                            </button>
                         </form>
                         <div style={styles.searchResults}>
                             {searchResults.map(track => (
                                 <div key={track.id} style={styles.trackItem}>
                                     <img src={track.artwork_url} alt={track.title} style={styles.trackArt}/>
-                                    <div style={styles.trackInfo}><strong>{track.title}</strong><span>{track.user.username}</span></div>
-                                    <button onClick={() => addToQueueHandler(track)} style={styles.addButton}>+</button>
+                                    <div style={styles.trackInfo}>
+                                        <strong>{track.title}</strong>
+                                        <span>{track.user.username}</span>
+                                    </div>
+                                    <button onClick={() => addToQueueHandler(track)} style={styles.addButton}>
+                                        +
+                                    </button>
                                 </div>
                             ))}
                         </div>
@@ -308,19 +395,23 @@ const RoomPage = () => {
                     <div style={styles.voiceControls}>
                         <h4>Участники в аудиочате:</h4>
                         
+                        {/* Показываем себя */}
                         {userStreamRef.current && (
                             <ParticipantView 
                                 user={userInfo} 
                                 stream={userStreamRef.current} 
-                                isMuted={isMuted} 
+                                isMuted={isMuted}
+                                isCurrentUser={true}
                             />
                         )}
 
+                        {/* Показываем удаленных участников */}
                         {peers.map((p) => (
                             <ParticipantView 
                                 key={p.peerId} 
                                 peer={p.peer} 
-                                user={p.user} 
+                                user={p.user}
+                                isCurrentUser={false}
                             />
                         ))}
                         
@@ -333,18 +424,33 @@ const RoomPage = () => {
                                     Выйти
                                 </button>
                             </div>
-                        ) : <p style={{color: 'red'}}>Доступ к микрофону не предоставлен.</p>}
+                        ) : (
+                            <p style={{color: 'red'}}>Доступ к микрофону не предоставлен.</p>
+                        )}
                     </div>
                     <h3>Чат</h3>
                     <div style={styles.chatBox}>
-                        {messages.map((msg, index) => (<div key={index} style={styles.message}>
-                            <strong style={{ color: msg.user._id === userInfo?._id ? '#007bff' : '#28a745' }}>{msg.user.name}:</strong>{' '}{msg.message}
-                        </div>))}
+                        {messages.map((msg, index) => (
+                            <div key={index} style={styles.message}>
+                                <strong style={{ color: msg.user._id === userInfo?._id ? '#007bff' : '#28a745' }}>
+                                    {msg.user.name}:
+                                </strong>
+                                {' '}{msg.message}
+                            </div>
+                        ))}
                         <div ref={chatEndRef} />
                     </div>
                     <form onSubmit={sendMessageHandler}>
-                        <input type="text" value={newMessage} onChange={(e) => setNewMessage(e.target.value)} placeholder="Введите сообщение..." style={styles.chatInput}/>
-                        <button type="submit" style={styles.chatButton}>Отправить</button>
+                        <input 
+                            type="text" 
+                            value={newMessage} 
+                            onChange={(e) => setNewMessage(e.target.value)} 
+                            placeholder="Введите сообщение..." 
+                            style={styles.chatInput}
+                        />
+                        <button type="submit" style={styles.chatButton}>
+                            Отправить
+                        </button>
                     </form>
                 </div>
             </div>
@@ -352,7 +458,7 @@ const RoomPage = () => {
     );
 };
 
-// --- СТИЛИ ---
+// Стили остаются без изменений
 const styles = {
     container: { padding: '2rem', height: 'calc(100vh - 4rem)', boxSizing: 'border-box', fontFamily: 'sans-serif' },
     mainContent: { display: 'flex', gap: '2rem', marginTop: '1rem', height: 'calc(100% - 50px)' },
@@ -374,7 +480,6 @@ const styles = {
     trackItem: { display: 'flex', alignItems: 'center', marginBottom: '0.5rem', padding: '0.5rem', backgroundColor: '#fff', borderRadius: '4px' },
     trackArt: { width: '40px', height: '40px', marginRight: '10px', borderRadius: '4px', objectFit: 'cover', flexShrink: 0 },
     trackInfo: { flexGrow: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', whiteSpace: 'nowrap' },
-    'trackInfo > strong': { textOverflow: 'ellipsis', overflow: 'hidden' },
     addButton: { padding: '5px 10px', cursor: 'pointer', border: '1px solid #007bff', backgroundColor: 'transparent', color: '#007bff', borderRadius: '4px' },
     chatBox: { flexGrow: 1, overflowY: 'auto', border: '1px solid #ddd', padding: '10px', marginBottom: '10px', backgroundColor: '#fff', borderRadius: '4px' },
     message: { marginBottom: '5px', wordBreak: 'break-word' },
